@@ -1,0 +1,33 @@
+# NeuroRx AI — Databricks App runtime manifest (Task 3.4)
+#
+# Verified against current Databricks Apps docs this session (not guessed):
+# `command` + `env` is everything app.yaml itself contains; the `env` block's
+# `valueFrom` entries resolve against resources bound to this app, whose
+# *bindings* live one level up — either the Databricks Apps UI's own
+# "Add resource" flow at deploy time, or a Databricks Asset Bundle's
+# `databricks.yml` (see `app/databricks.yml`, added alongside this file since
+# this project doesn't have a bundle root yet). app.yaml alone declares
+# nothing about *which* endpoint/warehouse/database — only that this app
+# expects resources under these three keys to exist by the time it starts.
+
+command: ['streamlit', 'run', 'app.py']
+
+env:
+  # Matches the literal env var name the Databricks chat-app template reads
+  # (`os.getenv('SERVING_ENDPOINT')`, confirmed against the template's live
+  # source this session) — app/agent_client.py hardcodes ENDPOINT_NAME
+  # instead of reading this var today (Task 3.3/3.4 didn't need it
+  # configurable), but the resource key + env var pairing is set up the
+  # standard way now so a future change to read it is a one-line diff, not a
+  # new resource binding.
+  - name: 'SERVING_ENDPOINT'
+    valueFrom: 'serving_endpoint'
+
+  - name: 'DATABRICKS_SQL_WAREHOUSE_HTTP_PATH'
+    valueFrom: 'sql_warehouse'
+
+  - name: 'LAKEBASE_DATABASE'
+    valueFrom: 'postgres'
+
+  - name: 'STREAMLIT_GATHER_USAGE_STATS'
+    value: 'false'
