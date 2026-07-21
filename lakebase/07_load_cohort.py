@@ -22,13 +22,25 @@ Verified live (DATA_CONTRACTS.md §4):
 - Deterministic seed=42 via 04_synthetic_cohort.py is stable across re-runs
 """
 
-import psycopg
+import os
 from datetime import datetime
+from pathlib import Path
+
+import psycopg
 from app.config import settings
 
 
 def get_lakebase_connection():
     """Create a connection to Lakebase using native Postgres credentials.
+
+    Two modes:
+      - **Real Lakebase** (default): TLS-required connection on 5432 using the
+        `settings.lakebase_*` credentials.
+      - **Local dev**: if `NEURORX_LOCAL_PG` is set to a libpq connection string
+        (e.g. "host=/tmp/nrx_pg port=5439 user=postgres dbname=databricks_postgres"),
+        connect to that instead with no forced sslmode. This is the off-workspace
+        demo path — a local Postgres standing in for Lakebase so the app can be
+        driven end to end without provisioning the workspace.
 
     Returns:
         psycopg.Connection: A raw Postgres connection (not pooled).
@@ -38,6 +50,10 @@ def get_lakebase_connection():
         connection, which is decorated @st.cache_resource and unsuitable for
         long-running batch jobs outside Streamlit's runtime.
     """
+    local = os.getenv("NEURORX_LOCAL_PG")
+    if local:
+        return psycopg.connect(local)
+
     return psycopg.connect(
         host=settings.lakebase_host,
         dbname=settings.lakebase_db,
@@ -46,6 +62,55 @@ def get_lakebase_connection():
         port=5432,
         sslmode="require",
     )
+
+
+def read_cohort_from_parquet(parquet_dir):
+    """Read the synthetic cohort from local Parquet (the off-workspace path).
+
+    Consumes exactly what `04_synthetic_cohort.py`'s local-fallback mode writes.
+    Returns three lists of plain dicts in the same shape `main()`'s Spark path
+    produces via `row.asDict()`, so every downstream batch loader is unchanged.
+    """
+    import pandas as pd
+
+    d = Path(parquet_dir)
+
+    def load(table, columns):
+        df = pd.read_parquet(d / f"{table}.parquet")[list(columns)]
+        rows = df.to_dict("records")
+        for r in rows:
+            # pandas represents a null timestamp as NaT and null numerics as NaN.
+            # psycopg does NOT map either to SQL NULL — it serializes NaT as a
+            # garbage overflow timestamp (seen: year 48113), which then trips the
+            # `dose_events_actioned_consistent` CHECK because a 'missed' dose
+            # appears to carry an action time. Convert every pandas-null scalar to
+            # None so NULL columns actually arrive as NULL. Caught by loading into
+            # real Postgres, not visible in the Parquet itself.
+            for k, v in list(r.items()):
+                if k == "dose_times":
+                    continue  # array column; handled below, pd.isna would be ambiguous
+                if v is None:
+                    continue
+                try:
+                    if pd.isna(v):
+                        r[k] = None
+                except (TypeError, ValueError):
+                    pass  # non-scalar (shouldn't occur here); leave as-is
+            # dose_times is a numpy array from Parquet; the schedule loader iterates
+            # it and psycopg maps a plain list to TIME[]. Match Spark's ArrayType.
+            if r.get("dose_times") is not None:
+                r["dose_times"] = list(r["dose_times"])
+        return rows
+
+    patients = load("synthetic_patients_raw",
+                    ("patient_id", "display_name", "caregiver_name", "created_at"))
+    schedules = load("synthetic_schedules_raw",
+                     ("schedule_id", "patient_id", "rxcui", "drug_name", "dose_text",
+                      "times_per_day", "dose_times", "timing_notes", "status", "created_at"))
+    dose_events = load("synthetic_dose_events_raw",
+                       ("event_id", "schedule_id", "patient_id", "planned_ts",
+                        "actioned_ts", "status"))
+    return patients, schedules, dose_events
 
 
 def build_drug_name_to_rxcui_map(conn):
@@ -82,9 +147,13 @@ def build_drug_name_to_rxcui_map(conn):
             for generic_name, rxcui in cur.fetchall():
                 drug_map[generic_name] = rxcui
     except Exception:
-        # gold.drugs may not exist yet if pipeline hasn't run.
-        # Fall back to a hardcoded map for the demo cohort's known drugs.
-        pass
+        # gold.drugs may not exist yet if the pipeline hasn't run (it never has
+        # on the local demo path). A failed statement leaves the whole
+        # transaction ABORTED — every later insert then dies with
+        # InFailedSqlTransaction — so we MUST roll back here, not just swallow the
+        # error. (Same transaction-poisoning hazard CLAUDE.md flags for Task 3.5's
+        # UndefinedTable handling.) Then fall back to the hardcoded demo map.
+        conn.rollback()
 
     # Hardcoded fallback for the demo drugs and common ones (DATA_CONTRACTS.md verified)
     fallback_map = {
@@ -153,6 +222,35 @@ def build_drug_name_to_rxcui_map(conn):
             drug_map[drug_name] = rxcui
 
     return drug_map
+
+
+def fill_missing_rxcuis(drug_map, drug_names):
+    """Ensure every drug name has a numeric RxCUI, synthesizing placeholders.
+
+    The curated cohort schedules ~132 distinct drugs, but the real-RxCUI map
+    (gold.drugs + the hardcoded demo fallback) only covers ~57. On the real
+    workspace path gold.drugs supplies the rest; on the local demo path it does
+    not exist, so an unmapped drug would KeyError the whole load.
+
+    For the demo-critical drugs (metformin/lisinopril/warfarin/atorvastatin and
+    the other hardcoded ones) the map already holds the *real* RxCUI, and those
+    are untouched here. For everything else this fills a DETERMINISTIC synthetic
+    RxCUI in a high, clearly-non-real range (900000000+) that satisfies the
+    schema's `rxcui ~ '^[0-9]+$'` CHECK. These are placeholders standing in for a
+    real RxNorm resolution that only happens on the workspace path — they must
+    never be treated as clinically meaningful, but they let the full cohort load
+    so the dashboard's cohort-level views have data.
+    """
+    import hashlib
+
+    added = 0
+    for name in sorted(set(drug_names)):
+        if name in drug_map:
+            continue
+        h = int(hashlib.md5(name.encode()).hexdigest(), 16)
+        drug_map[name] = str(900000000 + (h % 90000000))  # 9-digit, unambiguously synthetic
+        added += 1
+    return drug_map, added
 
 
 def load_patients_batch(conn, patients_batch):
@@ -415,55 +513,60 @@ def main():
     print("=" * 80)
     print()
 
-    # Step 1: Read from Delta
-    print("📖 Reading synthetic cohort from Delta (neurorx.bronze.synthetic_*)...")
+    # Step 1: Read the cohort — from local Parquet if NEURORX_COHORT_PARQUET is set
+    # (the off-workspace demo path), otherwise from the Delta bronze tables.
+    parquet_dir = os.getenv("NEURORX_COHORT_PARQUET")
+    if parquet_dir:
+        print(f"📖 Reading synthetic cohort from local Parquet ({parquet_dir})...")
+        patients_list, schedules_list, dose_events_list = read_cohort_from_parquet(
+            parquet_dir
+        )
+    else:
+        print("📖 Reading synthetic cohort from Delta (neurorx.bronze.synthetic_*)...")
+        patients_df = spark.read.table(
+            f"{settings.schema_bronze}.synthetic_patients_raw"
+        ).select(
+            "patient_id", "display_name", "caregiver_name", "created_at"
+        )
+        schedules_df = spark.read.table(
+            f"{settings.schema_bronze}.synthetic_schedules_raw"
+        ).select(
+            "schedule_id",
+            "patient_id",
+            "rxcui",
+            "drug_name",
+            "dose_text",
+            "times_per_day",
+            "dose_times",
+            "timing_notes",
+            "status",
+            "created_at",
+        )
+        dose_events_df = spark.read.table(
+            f"{settings.schema_bronze}.synthetic_dose_events_raw"
+        ).select(
+            "event_id",
+            "schedule_id",
+            "patient_id",
+            "planned_ts",
+            "actioned_ts",
+            "status",
+        )
+        # Convert to Python for batch loading. (In production a SQL Statement
+        # Execution API call would be more efficient, but Python batches via
+        # psycopg are simpler and sufficient here.)
+        patients_list = [row.asDict() for row in patients_df.collect()]
+        schedules_list = [row.asDict() for row in schedules_df.collect()]
+        dose_events_list = [row.asDict() for row in dose_events_df.collect()]
 
-    patients_df = spark.read.table(
-        f"{settings.schema_bronze}.synthetic_patients_raw"
-    ).select(
-        "patient_id", "display_name", "caregiver_name", "created_at"
-    )
-    schedules_df = spark.read.table(
-        f"{settings.schema_bronze}.synthetic_schedules_raw"
-    ).select(
-        "schedule_id",
-        "patient_id",
-        "rxcui",
-        "drug_name",
-        "dose_text",
-        "times_per_day",
-        "dose_times",
-        "timing_notes",
-        "status",
-        "created_at",
-    )
-    dose_events_df = spark.read.table(
-        f"{settings.schema_bronze}.synthetic_dose_events_raw"
-    ).select(
-        "event_id",
-        "schedule_id",
-        "patient_id",
-        "planned_ts",
-        "actioned_ts",
-        "status",
-    )
-
-    # Collect source row counts for reconciliation
-    patients_count = patients_df.count()
-    schedules_count = schedules_df.count()
-    dose_events_count = dose_events_df.count()
+    patients_count = len(patients_list)
+    schedules_count = len(schedules_list)
+    dose_events_count = len(dose_events_list)
 
     print(f"   ✓ Patients:    {patients_count:6d} rows")
     print(f"   ✓ Schedules:   {schedules_count:6d} rows")
     print(f"   ✓ Dose events: {dose_events_count:6d} rows")
     print()
-
-    # Convert to Python for batch loading
-    # (In production, a SQL Statement Execution API call would be more efficient,
-    # but for this hackathon, Python batches via psycopg are simpler and sufficient.)
-    patients_list = [row.asDict() for row in patients_df.collect()]
-    schedules_list = [row.asDict() for row in schedules_df.collect()]
-    dose_events_list = [row.asDict() for row in dose_events_df.collect()]
 
     # Step 2: Connect to Lakebase
     print("🔌 Connecting to Lakebase (neurorx-oltp)...")
@@ -475,7 +578,15 @@ def main():
         # Step 3: Build drug name -> RxCUI map (Task 1.4's generator uses names; Lakebase needs RxCUIs)
         print("🔗 Building drug name → RxCUI mapping...")
         drug_rxcui_map = build_drug_name_to_rxcui_map(conn)
-        print(f"   ✓ Mapped {len(drug_rxcui_map)} drugs")
+        print(f"   ✓ Mapped {len(drug_rxcui_map)} drugs from gold.drugs + demo fallback")
+        # On the local demo path gold.drugs doesn't exist, so most curated drugs
+        # have no real RxCUI. Fill the gaps with deterministic synthetic ones so
+        # the whole cohort loads; the demo-critical drugs keep their real values.
+        cohort_drugs = [str(r["drug_name"]) for r in schedules_list]
+        drug_rxcui_map, synth = fill_missing_rxcuis(drug_rxcui_map, cohort_drugs)
+        if synth:
+            print(f"   ⚠️  Synthesized {synth} placeholder RxCUIs for un-resolved drugs "
+                  f"(local demo path; real resolution happens via gold.drugs on the workspace)")
         print()
 
         # Step 4: Load patients

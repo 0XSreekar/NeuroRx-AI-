@@ -81,8 +81,28 @@ def render(patient_id: str) -> None:
     caregiver_mode = st.toggle("👨‍👩‍👧 Caregiver Mode", value=False)
 
     with st.spinner("📊 Loading adherence data..."):
-        stats = db.get_adherence_stats(patient_id, window_days=30)
-        daily_rows = db.adherence_summary(patient_id, days=_HEATMAP_WINDOW_DAYS)
+        try:
+            stats = db.get_adherence_stats(patient_id, window_days=30)
+            daily_rows = db.adherence_summary(patient_id, days=_HEATMAP_WINDOW_DAYS)
+        except Exception as exc:  # noqa: BLE001 — surface any analytics-store failure as one message
+            # The dashboard reads adherence from Delta (gold.adherence_facts) via
+            # the SQL warehouse — the deliberate OLTP-vs-analytics split (F9). That
+            # path needs the live Databricks workspace: the warehouse discovery
+            # (`get_warehouse_http_path()`) and the Delta query only work there.
+            # On the local demo path (NEURORX_LOCAL_PG) there is no warehouse, so
+            # rather than hang on SDK retries or dump a raw traceback, degrade to a
+            # clear, honest notice. The Today tab still works fully off Lakebase.
+            st.warning(
+                "📊 **Adherence analytics require the Databricks workspace.**\n\n"
+                "This dashboard reads from `neurorx.gold.adherence_facts` (Delta) "
+                "through the SQL warehouse — the analytics store, separate from the "
+                "live Lakebase data the Today tab uses. Connect a workspace "
+                "(populate `.env` and run the Lakeflow pipeline) to see adherence "
+                "trends here."
+            )
+            with st.expander("Technical detail"):
+                st.caption(f"`{type(exc).__name__}: {exc}`")
+            return
 
     _render_header_stats(stats)
 

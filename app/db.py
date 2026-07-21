@@ -95,7 +95,16 @@ def _get_pool() -> ConnectionPool:
     re-executes on every interaction) reuses the same pool instead of
     leaking a new one on every rerun.
     """
-    conninfo = (
+    # NEURORX_LOCAL_PG lets local dev point the app at a plain local Postgres
+    # standing in for Lakebase (the off-workspace demo path) — a full libpq
+    # conninfo string, used verbatim, with no forced TLS. Unset in every real
+    # deployment, where the Lakebase credentials below apply. Same switch the
+    # cohort loader (lakebase/07_load_cohort.py) honors, so both point at the
+    # same store from one env var.
+    import os
+
+    local = os.getenv("NEURORX_LOCAL_PG")
+    conninfo = local or (
         f"host={settings.lakebase_host} "
         f"dbname={settings.lakebase_db} "
         f"user={settings.lakebase_user} "
@@ -266,6 +275,19 @@ def mark_dose(
         raise ValueError(f"Invalid dose status: {status!r}")
     actioned_ts = ts if status in ("taken", "skipped") else None
 
+    # A dose can legitimately be actioned EARLY — taking the 18:00 dose at
+    # 17:40, or skipping tonight's dose in advance ("I know I won't take
+    # it"). But DATA_CONTRACTS.md §6.3's frozen `actioned_after_planned`
+    # CHECK requires actioned_ts >= planned_ts, so an early action's true
+    # wall-clock time is unrepresentable; writing it raises CheckViolation
+    # and (before this fix) crashed the whole Today tab on the first
+    # early Skip click — found by a user actually clicking, not by the
+    # test suite, which only ever marked a past-due dose. Clamp to
+    # planned_ts: the action is recorded against its slot, the (small)
+    # loss of the true early timestamp is the price of the frozen contract.
+    if actioned_ts is not None and actioned_ts < planned_ts:
+        actioned_ts = planned_ts
+
     with _get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             # patient_id is looked up from schedules rather than trusted from
@@ -410,6 +432,19 @@ def get_warehouse_http_path() -> str:
     for Task 2.8's `build_resources()`. `.odbc_params.path` is the verified
     attribute name (see module docstring) — not a guessed `.http_path`.
     """
+    # On the local demo path there is no Databricks workspace at all, so warehouse
+    # discovery cannot succeed — and against a placeholder host the SDK retries for
+    # minutes before finally raising, which reads as a hung dashboard. Fail fast
+    # and clearly instead. Delta-backed analytics simply are not available without
+    # a workspace; the caller (dashboard) degrades gracefully on this error.
+    import os
+
+    if os.getenv("NEURORX_LOCAL_PG"):
+        raise RuntimeError(
+            "Delta/SQL-warehouse analytics are unavailable on the local demo path "
+            "(NEURORX_LOCAL_PG is set). Connect a Databricks workspace to enable them."
+        )
+
     from databricks.sdk import WorkspaceClient
 
     w = WorkspaceClient(host=settings.databricks_host, token=settings.databricks_token)

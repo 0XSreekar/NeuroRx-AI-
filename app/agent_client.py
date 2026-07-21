@@ -97,6 +97,33 @@ CHUNK_ID_PATTERN = re.compile(r"\[([0-9a-f-]{36}:[a-z_]+:\d{4})\]")
 ENDPOINT_NAME = "neurorx-agent"  # Task 2.8's deployed endpoint name
 
 
+class AgentEndpointUnavailable(RuntimeError):
+    """The deployed agent endpoint can't be reached in this environment.
+
+    Raised eagerly on the local demo path so the Chat view degrades to a clear
+    message instead of the mlflow/SDK client retrying a placeholder host for
+    minutes (the same multi-minute hang the Dashboard's warehouse discovery hit).
+    """
+
+
+def _require_agent_endpoint() -> None:
+    """Fail fast when there is no workspace hosting the agent endpoint.
+
+    The Chat tab needs the deployed `neurorx-agent` serving endpoint, which only
+    exists on a live Databricks workspace. On the local demo path
+    (NEURORX_LOCAL_PG set) it cannot exist, so raise immediately rather than let
+    the client burn minutes on retries.
+    """
+    import os
+
+    if os.getenv("NEURORX_LOCAL_PG"):
+        raise AgentEndpointUnavailable(
+            "The chat agent needs the deployed neurorx-agent serving endpoint, "
+            "which requires a Databricks workspace. It is unavailable on the local "
+            "demo path (NEURORX_LOCAL_PG is set)."
+        )
+
+
 def _get_workspace_client() -> WorkspaceClient:
     return WorkspaceClient(host=settings.databricks_host, token=settings.databricks_token)
 
@@ -212,6 +239,7 @@ def chat(messages: list[dict], patient_id: str) -> dict:
     from agent.guardrail import check as guardrail_check
     from agent.guardrail import tool_trace_from_responses_output
 
+    _require_agent_endpoint()
     w = _get_workspace_client()
     response = w.api_client.do(
         "POST",
@@ -270,6 +298,7 @@ def chat_stream(messages: list[dict], patient_id: str):
     fully-accumulated text after the stream completes, before the final
     render — not checking each token-delta as it arrives.
     """
+    _require_agent_endpoint()
     from mlflow.deployments import get_deploy_client
 
     client = get_deploy_client("databricks")

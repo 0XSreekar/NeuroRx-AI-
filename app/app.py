@@ -17,6 +17,28 @@ All three tabs are now implemented: **Chat** (Task 3.4), **Today**
 (Task 3.5), **Dashboard** (Task 3.6).
 """
 
+import sys
+from pathlib import Path
+
+# Put the repo root on sys.path BEFORE any `app.*` import.
+#
+# Every module in this project imports itself as `app.config` / `app.db` /
+# `app.views.*` — i.e. it assumes `app` is an importable package rooted at the
+# repo root. Nothing was actually arranging for that to be true:
+#
+#   - `streamlit run app/app.py` (from the repo root) puts the *script's own*
+#     directory — `app/` — on sys.path, not the repo root. So `app` is not
+#     importable and this file died with "No module named 'app.views'".
+#   - `app.yaml`'s `command: ['streamlit', 'run', 'app.py']` runs from *inside*
+#     `app/`, which has the same problem for the deployed app.
+#
+# Deriving the root from `__file__` rather than cwd makes both launch paths work
+# identically, which matters because the deployed app and local dev must not
+# diverge here. Found by actually running the app, not by reading it.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 import streamlit as st
 
 from app.views import chat as chat_view
