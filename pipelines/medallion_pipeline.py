@@ -574,8 +574,26 @@ def adherence_facts():
         F.sum(F.when(F.col("status") == "missed", 1).otherwise(0)).alias("missed_doses"),
     )
 
+    # ⚠️ The Phase-1 source table's `rxcui` column holds drug NAMES, not numeric
+    # RxCUIs — Task 1.4's generator writes `"rxcui": drug_name` as a documented
+    # placeholder ("left as names for Phase 3 resolution", DATA_CONTRACTS.md
+    # §3.5). A plain `on="rxcui"` equi-join against silver.drugs' numeric RxCUIs
+    # therefore matches ZERO rows: every adherence_facts row gets drug_name NULL,
+    # which silently breaks setup/phase1_checkpoint.sql's queries 6b/6c
+    # (`WHERE drug_name = 'metformin'` → no rows) and get_adherence_stats'
+    # most_missed_drug — the whole Margaret Demo story — with no error anywhere.
+    # Same failure shape as checkpoint query 6c's own earlier rxcui-vs-drug_name
+    # bug, one level deeper. The join condition below accepts either a real
+    # numeric RxCUI match (the Phase-3 path, once Task 3.8's loader-resolved
+    # values flow back through CDF sync) or a case-insensitive name match (the
+    # Phase-1 synthetic path) — so this one definition works on both sides of
+    # the SOURCE_TABLE flip above.
+    drugs_lookup = drugs.withColumnRenamed("rxcui", "_drug_rxcui")
+    join_cond = (aggregated["rxcui"] == drugs_lookup["_drug_rxcui"]) | (
+        F.lower(aggregated["rxcui"]) == drugs_lookup["generic_name"]
+    )
     return (
-        aggregated.join(drugs, on="rxcui", how="left")
+        aggregated.join(drugs_lookup, on=join_cond, how="left")
         .withColumn("drug_name", F.col("generic_name"))
         .withColumn(
             "adherence_pct",

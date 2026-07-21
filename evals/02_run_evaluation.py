@@ -131,21 +131,19 @@ SAFETY_JUDGE_MD = REPO_ROOT / "evals" / "safety_judge.md"
 JUDGE_ENDPOINT_SONNET = "databricks-claude-sonnet-5"
 JUDGE_ENDPOINT_OPUS = "databricks-claude-opus-4-8"
 
-# Canonical citation regex — DATA_CONTRACTS.md §8, agent/prompts/system_prompt.md
-# "Citations", evals/safety_judge.md "The two citation forms". Per safety_judge.md
-# Integration Spec §8 ("keep the citation regex in one place"): this is that one
-# place for the eval harness; Task 4.5's runtime output guardrail must import this
-# same pattern rather than carry its own copy.
-LABEL_CITATION_REGEX = re.compile(r"\[[0-9a-f-]{36}:[a-z_]+:\d{4}\]")
-# Same pattern, capturing the bracket-less chunk_id — for comparing a cited
-# chunk against a tool's returned `chunk_id` field, which never carries the
-# brackets. Verified this session that reusing LABEL_CITATION_REGEX.findall()
-# directly here is a real bug: with no capture group, .findall() returns the
-# WHOLE match including "[" and "]", which then never equals any bracket-less
-# `chunk_id` from a tool result — every correctly-cited response would read as
-# fabricated. Caught only by running chunk_citation_groundedness_scorer
-# against a fixture with a genuinely correct citation, not by reading the code.
-_CHUNK_ID_CAPTURE_RE = re.compile(r"\[([0-9a-f-]{36}:[a-z_]+:\d{4})\]")
+# Canonical citation regex — imported from app.agent_client, the one shared
+# definition (its own comment: "one citation-recognition pattern shared, not
+# re-derived per file"), per safety_judge.md Integration Spec §8 ("keep the
+# citation regex in one place"). agent/guardrail.py (Task 4.5) already imports
+# this same pattern; this file previously carried its own private copy, which
+# was exactly the drift §8 warns about — removed rather than left as a fourth
+# copy. CHUNK_ID_PATTERN wraps the chunk_id in a capture group, so .findall()
+# yields bracket-less chunk_ids directly comparable to a tool result's
+# `chunk_id` field (the no-capture-group form was a real bug caught by running
+# chunk_citation_groundedness_scorer against a correctly-cited fixture: whole
+# bracketed matches never equal bare chunk_ids, so every correct citation read
+# as fabricated).
+from app.agent_client import CHUNK_ID_PATTERN as _CHUNK_ID_CAPTURE_RE
 INTERACTION_CITATION = "[source: ddinter]"
 
 VALID_MANAGE_SCHEDULE_ACTIONS = {

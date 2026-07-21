@@ -142,6 +142,19 @@ def _render_streaming_response(patient_id: str, history: list[dict]) -> dict | N
                     placeholder.markdown(accumulated_text)
                 elif event_type == "response.output_item.done":
                     last_output_items.append(event.get("item", {}))
+        except agent_client.AgentEndpointUnavailable:
+            # No workspace hosting the agent endpoint (local demo path). The guard
+            # inside chat_stream raises this on first iteration. Show a clear,
+            # non-alarming message and return a well-formed result so NO spinner
+            # fallback fires (chat() would hit the same wall and hang) and history
+            # stays consistent. Parity with the Dashboard's graceful degradation.
+            placeholder.info(
+                "💬 **Chat needs the Databricks workspace.** The assistant runs on "
+                "the deployed `neurorx-agent` serving endpoint, which isn't "
+                "available on the local demo path. The Today tab works fully "
+                "against local data; connect a workspace to enable chat."
+            )
+            return {"text": "", "citations": [], "pending_confirmation": None}
         except NotImplementedError:
             # Confirmed real signal (see agent_client.chat_stream()'s
             # docstring): the deployment client doesn't support streaming at
@@ -247,11 +260,24 @@ def _render_pending_confirmation_card_if_any(patient_id: str) -> None:
                     response = agent_client.call_manage_schedule(
                         pending.get("patient_id") or patient_id, pending["action"], payload
                     )
-                st.session_state.pending_confirmation = (
-                    response if response.get("status") in
-                    ("needs_confirmation", "blocked_pending_confirmation")
-                    else None
-                )
+                if response.get("status") in (
+                    "needs_confirmation", "blocked_pending_confirmation"
+                ):
+                    # Still gated — re-render the card with the new verdict,
+                    # preserving the attempted action/payload for resubmission.
+                    response["patient_id"] = pending.get("patient_id") or patient_id
+                    response["action"] = pending["action"]
+                    response["payload"] = payload
+                    st.session_state.pending_confirmation = response
+                elif response.get("error"):
+                    # {"error": ...} has no "status" key — an earlier version
+                    # silently dismissed the card here, indistinguishable from
+                    # success. Show the failure and keep the card up.
+                    st.session_state.pending_confirmation = pending  # unchanged
+                    st.error(f"❌ Schedule was NOT updated: {response['error']}")
+                    st.stop()  # keep the error visible; no rerun that would clear it
+                else:
+                    st.session_state.pending_confirmation = None
                 st.rerun()
         with col_cancel:
             if st.button("✕ Cancel", key="cancel_pending", use_container_width=True):
@@ -366,6 +392,25 @@ def _submit_extraction(patient_id: str, original_drugs: list[dict], edited_rows:
             }
         )
 
+    # A needs_review drug can carry rxcui=None (no confident RxNorm match) or
+    # times_per_day=None (unschedulable frequency) — manage_schedule's own
+    # validation rejects both. Surface that BEFORE submitting rather than
+    # letting the whole batch fail with a validation error the user can't
+    # act on from this card. The card already labels these rows "⚠️ Needs
+    # Review" with reasons; this makes Confirm actually respect that state.
+    unresolvable = [
+        d["drug_name"] for d in drugs_payload
+        if not (isinstance(d.get("rxcui"), str) and d["rxcui"].isdigit())
+        or not isinstance(d.get("times_per_day"), int)
+    ]
+    if unresolvable:
+        st.error(
+            f"⚠️ Can't add yet: {', '.join(unresolvable)} still need(s) review "
+            "(no confirmed drug match or no schedulable frequency). Edit the "
+            "row(s) or remove them, then confirm again."
+        )
+        return  # keep the card open — nothing was submitted
+
     payload = {"drugs": drugs_payload, "user_confirmed": True}
     response = agent_client.call_manage_schedule(patient_id, "create_from_extraction", payload)
 
@@ -377,6 +422,13 @@ def _submit_extraction(patient_id: str, original_drugs: list[dict], edited_rows:
         response["action"] = "create_from_extraction"
         response["payload"] = payload
         st.session_state.pending_confirmation = response
+    elif response.get("error"):
+        # manage_schedule returns {"error": ...} with NO "status" key on any
+        # validation/backend failure — an earlier version fell through to
+        # st.success("Schedule updated.") here, silently reporting success on
+        # an error. Keep the card open so the user can fix and retry.
+        st.error(f"❌ Schedule was NOT updated: {response['error']}")
+        return
     else:
         st.success("Schedule updated.")
 

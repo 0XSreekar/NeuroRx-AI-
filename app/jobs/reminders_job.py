@@ -43,6 +43,8 @@ reading just this file (not the README) sees it too: don't add a Twilio
 call to this file without first reading why it isn't here.
 """
 
+import os
+
 import psycopg
 
 from app.config import settings
@@ -58,6 +60,13 @@ def _connect() -> psycopg.Connection:
     is not a long-lived process serving concurrent requests the way the
     Streamlit app is, so app/db.py's pool sizing rationale doesn't apply.
     """
+    # NEURORX_LOCAL_PG: same local-Postgres override app/db.py and
+    # lakebase/07_load_cohort.py honor — one env var points every component
+    # at the same store on the off-workspace demo path (docs/local_dev.md).
+    local = os.getenv("NEURORX_LOCAL_PG")
+    if local:
+        return psycopg.connect(local)
+
     return psycopg.connect(
         host=settings.lakebase_host,
         dbname=settings.lakebase_db,
@@ -83,6 +92,14 @@ def find_doses_due_soon(conn: psycopg.Connection) -> list[dict]:
     shared helper more confusing than two small, direct queries.
     """
     with conn.cursor() as cur:
+        # Both today's AND tomorrow's slots are generated before windowing.
+        # CURRENT_DATE alone has a midnight blind spot: a job run at 23:30
+        # never sees a 00:15 dose, because that dose's timestamp belongs to
+        # CURRENT_DATE + 1 — it would only get its notification after
+        # midnight, i.e. 15 minutes' warning instead of the promised 60.
+        # The BETWEEN window still bounds everything to the next
+        # LOOKAHEAD_MINUTES, so adding tomorrow's slots to the candidate set
+        # changes nothing except closing that boundary gap.
         cur.execute(
             """
             SELECT
@@ -90,10 +107,12 @@ def find_doses_due_soon(conn: psycopg.Connection) -> list[dict]:
                 s.patient_id,
                 s.drug_name,
                 s.dose_text,
-                (CURRENT_DATE + dt)::timestamptz AS due_ts
-            FROM schedules s, unnest(s.dose_times) AS dt
+                (d + dt)::timestamptz AS due_ts
+            FROM schedules s,
+                 unnest(s.dose_times) AS dt,
+                 unnest(ARRAY[CURRENT_DATE, CURRENT_DATE + 1]) AS d
             WHERE s.status = 'active'
-              AND (CURRENT_DATE + dt)::timestamptz
+              AND (d + dt)::timestamptz
                   BETWEEN now() AND now() + (%(lookahead)s * INTERVAL '1 minute')
             """,
             {"lookahead": LOOKAHEAD_MINUTES},

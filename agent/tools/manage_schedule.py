@@ -474,7 +474,7 @@ print(f"Registered {CATALOG}.app.manage_schedule")
 # MAGIC cannot be exercised outside an actual Databricks workspace.
 # MAGIC
 # MAGIC **CREATE-stub note:** the Lakebase `patients`/`schedules`/`dose_events`
-# MAGIC tables don't exist anywhere yet — Task 1.4 (still broken, see `CLAUDE.md`)
+# MAGIC tables don't exist anywhere yet in a live workspace — Task 1.4 (fixed; see `CLAUDE.md`)
 # MAGIC was meant to seed synthetic data into them and the actual `neurorx-oltp`
 # MAGIC schema DDL itself is Phase 3 scope (`ARCHITECTURE.md` §7). To run this
 # MAGIC harness against a real local Postgres, first apply the exact DDL from

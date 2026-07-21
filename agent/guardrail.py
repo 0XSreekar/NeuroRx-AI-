@@ -196,8 +196,21 @@ class GuardrailResult:
 # ---------------------------------------------------------------------------
 
 
-def _is_escalation(text: str) -> bool:
-    lowered = text.lower()
+def _is_escalation_sentence(sentence: str) -> bool:
+    """True when THIS sentence carries an escalation marker.
+
+    ⚠️ Deliberately per-sentence, not whole-response. An earlier version
+    short-circuited the ENTIRE guardrail whenever any marker appeared anywhere
+    in the response — meaning "Just take a double dose to catch up. If you feel
+    unwell, call 911." bypassed both layers completely, because the dosage
+    advice rode in on the same response as the escalation text. That inverts
+    the requirement: escalation-message *numbers* ("911", "1-800-222-1222")
+    must not trip Layer 1's dose-quantity patterns, but escalation text must
+    never grant amnesty to unrelated uncited dosage advice sitting next to it.
+    Exempting only the marker-bearing sentences preserves the requirement's
+    actual intent; every other sentence still goes through Layer 1 normally.
+    """
+    lowered = sentence.lower()
     return any(marker in lowered for marker in ESCALATION_MARKERS)
 
 
@@ -282,6 +295,11 @@ def _layer1_candidates(response_text: str, tool_trace: list[dict]) -> list[tuple
     candidates: list[tuple[str, str]] = []
 
     for sentence in _split_sentences(response_text):
+        if _is_escalation_sentence(sentence):
+            # Escalation phone numbers/frequencies must not trip the dosage
+            # patterns — but ONLY this sentence is exempt, never the whole
+            # response (see _is_escalation_sentence's own warning).
+            continue
         cited_chunks = set(CHUNK_ID_PATTERN.findall(sentence))
         has_real_label_citation = bool(cited_chunks & returned_chunks)
         has_interaction_citation = (
@@ -303,14 +321,27 @@ def _call_layer2_judge(candidates: list[tuple[str, str]]) -> str:
     raw "YES"/"NO" verdict — "YES" (fail-safe BLOCK) if the response can't
     be parsed as either; see module docstring for why that default is
     BLOCK, not ALLOW."""
-    from databricks_langchain import ChatDatabricks  # same verified import as agent/agent.py
-
-    llm = ChatDatabricks(endpoint=HAIKU_ENDPOINT)  # no temperature — see module docstring
     candidate_text = "\n".join(sentence for sentence, _ in candidates)
-    result = llm.invoke([
-        {"role": "system", "content": JUDGE_PROMPT},
-        {"role": "user", "content": candidate_text},
-    ])
+    try:
+        # Import inside the try: a missing/broken databricks_langchain install
+        # is a config error and must fail-safe BLOCK like any other judge
+        # failure, not raise ImportError up through check().
+        from databricks_langchain import ChatDatabricks  # same verified import as agent/agent.py
+
+        llm = ChatDatabricks(endpoint=HAIKU_ENDPOINT)  # no temperature — see module docstring
+        result = llm.invoke([
+            {"role": "system", "content": JUDGE_PROMPT},
+            {"role": "user", "content": candidate_text},
+        ])
+    except Exception:
+        # An unreachable/erroring judge endpoint must fail-safe BLOCK, exactly
+        # like an unparseable verdict — NOT propagate. An uncaught exception
+        # here would crash agent_client.chat() outright, and (worse) a caller
+        # that catches broadly might skip the guardrail entirely. This runs on
+        # live user turns: a false BLOCK costs one pharmacist-redirect
+        # fallback; an exception path that skips blocking ships unvetted
+        # dosage advice. Same asymmetry as the unparseable-output default.
+        return "YES"
     raw = (result.content if hasattr(result, "content") else str(result)).strip().upper()
     if raw.startswith("YES"):
         return "YES"
@@ -337,9 +368,8 @@ def check(response_text: str, tool_trace: list[dict] | None = None) -> Guardrail
     """
     tool_trace = tool_trace or []
 
-    if _is_escalation(response_text):
-        return GuardrailResult(allowed=True)
-
+    # No whole-response escalation short-circuit here — escalation handling
+    # is per-sentence inside _layer1_candidates (see _is_escalation_sentence).
     candidates = _layer1_candidates(response_text, tool_trace)
     if not candidates:
         return GuardrailResult(allowed=True)
