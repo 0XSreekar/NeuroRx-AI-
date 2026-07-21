@@ -1,0 +1,49 @@
+# NeuroRx AI — Databricks App runtime dependencies
+#
+# This is the manifest for the deployed Streamlit app (`app/app.yaml` runs
+# `streamlit run app.py`). Every version here was resolved live against the
+# PyPI JSON API, not written from memory — the same discipline CLAUDE.md §6
+# applies to external API field paths.
+#
+# Scope note: the *agent's* dependencies are deliberately NOT here. They are
+# pinned separately in `agent/log_agent.py`'s `pip_requirements=` list, which
+# is what MLflow bakes into the served model's own environment. The agent runs
+# in a Model Serving container, not in this app's container; keeping the two
+# lists separate is correct, not duplication to be consolidated.
+#
+# Local development: see `requirements-dev.txt` for ingestion/pipeline/test
+# extras that the deployed app never imports.
+
+# --- UI ---
+streamlit==1.59.2
+plotly==6.9.0
+
+# pandas is pinned to the 2.x line, NOT the latest 3.0.3, because
+# `mlflow==3.14.0` declares `pandas<3`. Caught by actually running
+# `pip install -r requirements.txt`, which failed with ResolutionImpossible —
+# "latest version on PyPI" and "compatible version set" are not the same thing,
+# and resolving each package independently against the PyPI JSON API cannot
+# detect this. Re-run the install after changing any pin here.
+pandas==2.3.3
+
+# --- Lakebase (OLTP) ---
+# psycopg v3, NOT psycopg2 — confirmed current for Lakebase (CLAUDE.md §4).
+# psycopg-pool is a separate distribution from psycopg; app/db.py imports both.
+psycopg==3.3.4
+psycopg-pool==3.3.1
+
+# --- Databricks ---
+# databricks-sdk: WorkspaceClient (agent endpoint invocation, warehouse discovery)
+# databricks-sql-connector: Delta reads for analytics (adherence_summary,
+#   resolve_citations). Uses PEP-249 `named` paramstyle (:name), NOT psycopg's
+#   %(name)s — see CLAUDE.md §4, Task 3.3. Do not interchange them.
+databricks-sdk==0.121.0
+databricks-sql-connector==4.3.0
+
+# mlflow: app/agent_client.py uses mlflow.deployments.get_deploy_client for
+# predict_stream() in the Chat view. Pinned to match agent/log_agent.py so the
+# app and the served agent agree on the client/server wire format.
+mlflow==3.14.0
+
+# --- Config ---
+python-dotenv==1.2.2

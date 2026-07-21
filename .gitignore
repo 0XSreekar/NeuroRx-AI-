@@ -86,3 +86,8 @@ databricks.yaml
 *.log
 temp/
 tmp/
+
+# Local synthetic cohort output (04_synthetic_cohort.py fallback mode).
+# Regenerate with `python data/ingestion/04_synthetic_cohort.py` — deterministic
+# at seed=42, so there is no reason to commit ~66k rows of Parquet.
+data/generated/

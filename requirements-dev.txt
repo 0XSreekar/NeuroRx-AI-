@@ -1,0 +1,48 @@
+# NeuroRx AI — local development / ingestion / verification dependencies
+#
+# NOT installed in the deployed app. Install with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Versions resolved live against the PyPI JSON API.
+
+-r requirements.txt
+
+# --- Ingestion notebooks (data/ingestion/*) ---
+requests==2.34.2
+numpy==2.5.1
+
+# --- Vector Search (pipelines/05_vector_index.py) ---
+# NOTE: this package is mid-rename. Per its own PyPI README, databricks-ai-search
+# is the new name and databricks-vectorsearch>=0.74 is now a thin re-export shim
+# that emits a deprecation warning (VectorSearchClient *is* AISearchClient —
+# literally the same class). 0.75 is past that threshold, so expect the warning.
+# CLAUDE.md §4 recorded this transition as pending; it has now landed.
+databricks-vectorsearch==0.75
+
+# --- Agent deployment driver (agent/06_deploy_agent.py) ---
+# databricks-agents==1.11.0 is DELIBERATELY NOT INSTALLED HERE.
+#
+# It hard-pins `whenever==0.7.3`, which ships no cp314 wheel and builds from a
+# Rust source tarball — so `pip install` fails outright on this machine's Python
+# 3.14 (verified: "Failed building wheel for whenever"). Installing a Rust
+# toolchain to satisfy it would be pointless: `06_deploy_agent.py` is a notebook
+# that runs ON Databricks, where the runtime supplies its own (older, wheel-
+# covered) Python. Nothing local imports this package.
+#
+# If you ever do need it locally, use a Python 3.12 venv rather than forcing a
+# source build:
+#     python3.12 -m venv .venv && .venv/bin/pip install databricks-agents==1.11.0
+
+# --- Local SQL verification (CLAUDE.md §4: "transpile-and-run") ---
+# sqlglot proves a .sql file parses; sqlglot->duckdb actually runs the logic
+# locally with no Spark/JDK. This pair caught a real Task 2.4 bug that both
+# reading and parsing missed.
+sqlglot
+duckdb
+
+# --- Lakeflow pipeline local checks ---
+# The open-source pyspark package does NOT include the expect*/expect_or_drop
+# decorator family (Databricks-Runtime-only). It can exercise everything else
+# in pipelines/medallion_pipeline.py. Requires Java 17+, which CLAUDE.md §4
+# notes is not available on this machine.
+pyspark
