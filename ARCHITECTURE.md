@@ -48,7 +48,7 @@ flowchart TB
         A2["RxNorm concepts<br/>rxnav.nlm.nih.gov"] --> V
         A3["DDInter 2.0<br/>severity-ranked DDI"] --> V
         V["Volume<br/>neurorx.bronze.raw_files"] --> B
-        A4["Synthetic patient cohort<br/>dbldatagen / Faker"] --> B
+        A4["Synthetic patient cohort<br/>deterministic numpy generator (seed=42)"] --> B
         B["Bronze — raw JSON as-ingested<br/>neurorx.bronze"]
         B -->|"Lakeflow Declarative Pipeline<br/>+ expectations (nulls, dupes)"| C
         C["Silver — normalized on RxCUI,<br/>chunked label sections,<br/>deduped interaction pairs<br/>neurorx.silver"]
@@ -89,7 +89,7 @@ flowchart TB
 | Drug labels (SPL) | openFDA API `api.fda.gov/drug/label` — free, no key at low volume | The clinical knowledge base. ~200 common drugs. Key sections: `dosage_and_administration`, `drug_interactions`, `warnings`, `information_for_patients` (contains missed-dose text) |
 | Drug normalization | RxNorm REST API (NLM, free) `rxnav.nlm.nih.gov` | Map any brand/generic name → canonical RxCUI. "Tylenol" = "acetaminophen" |
 | Drug–drug interactions | DDInter 2.0 (open academic, severity-ranked) **plus** interactions parsed from FDA label sections via `ai_query`/`ai_extract` | The deterministic `interaction_pairs` gold table: `(rxcui_a, rxcui_b, severity, description, source)` |
-| Patients + adherence history | Synthetic — `dbldatagen` or Faker: 50 patients, 6 months of dose events with realistic missed-dose patterns | Powers dashboard and Genie demo without any PHI |
+| Patients + adherence history | Synthetic — deterministic numpy generator (`data/ingestion/04_synthetic_cohort.py`, seed=42, no dbldatagen/Faker dependency): 50 patients, 6 months of dose events with realistic missed-dose patterns | Powers dashboard and Genie demo without any PHI |
 
 Using `ai_query` in the pipeline to structure messy label text is itself a demo-able Databricks feature.
 

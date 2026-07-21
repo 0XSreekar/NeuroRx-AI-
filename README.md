@@ -52,7 +52,7 @@ flowchart TB
         A2["RxNorm concepts<br/>rxnav.nlm.nih.gov"] --> V
         A3["DDInter 2.0<br/>severity-ranked DDI"] --> V
         V["Volume<br/>neurorx.bronze.raw_files"] --> B
-        A4["Synthetic patient cohort<br/>dbldatagen / Faker"] --> B
+        A4["Synthetic patient cohort<br/>deterministic numpy generator (seed=42)"] --> B
         B["Bronze — raw JSON as-ingested<br/>neurorx.bronze"]
         B -->|"Lakeflow Declarative Pipeline<br/>+ expectations (nulls, dupes)"| C
         C["Silver — normalized on RxCUI,<br/>chunked label sections,<br/>deduped interaction pairs<br/>neurorx.silver"]

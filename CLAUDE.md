@@ -679,20 +679,143 @@ a confirmed hard network block found (and worked around) in Task 2.3.
 > "configuration error" instruction? If the latter, switch to the SQL-function pattern —
 > don't keep debugging Python-sandbox auth.
 
-> ⚠️ **Task 1.4 was marked "✅ complete" in this file at one point; it was not.** Verified
-> by re-running `python3 data/ingestion/04_synthetic_cohort.py` directly: it still has all
-> three bugs a prior review found. (1) **Zero Spark/Delta writes** — `write_to_bronze_tables()`
-> only attaches audit columns to in-memory dicts and returns them; nothing reaches
-> `neurorx.bronze.synthetic_{patients,schedules,dose_events}_raw`, ever. (2) **`DRUG_LIST` is
-> still 75% non-curated** — 175 of 235 entries (`antibody`, `antioxidant`, `anesthetic`,
-> `anti-inflammatory`, `androgen`, `alfuzosin`...) don't exist in `01_openfda_ingest.py`'s
-> curated list, so most generated schedules reference drugs with no FDA label, no RxCUI, no
-> DDInter coverage. (3) **All 49 non-demo patients are surnamed "Smith"** — confirmed again
-> in a fresh run ("Mary Smith", "Robert Smith", "Anthony Smith", "Emily Smith"...) — `FIRST_NAMES`
-> has 52 entries, so `idx // len(FIRST_NAMES)` is `0` for every one of the 50 patients, always
-> indexing `LAST_NAMES[0]`. Lesson for this file specifically: **a "✅ complete" note added to
-> CLAUDE.md is a claim, not a fact — re-run the code before trusting it**, exactly like every
-> external API claim elsewhere in this document.
+### Task 1.4: Synthetic cohort generator — all three bugs fixed, a fourth found, now verified by a committed script
+
+**Fixed and verified by actually running it** (`data/ingestion/verify_cohort.py`, 24 checks,
+runs the generator twice into temp dirs; needs no Spark, no workspace, no network):
+
+1. **Zero Delta writes → real writes, dual-mode.** `write_to_bronze_tables()` now writes
+   Delta (`mode("overwrite")`, so a re-run at seed=42 is idempotent rather than doubling)
+   when a SparkSession exists, and local Parquet under `data/generated/` when one doesn't.
+   The local mode is what makes the off-workspace demo path possible at all.
+2. **`DRUG_LIST` 75% junk → sourced from the curated list.** Now parsed out of
+   `01_openfda_ingest.py` with `ast.literal_eval` (parsed, *not* imported — that notebook
+   makes ~200 live openFDA calls at module level). 223 real drugs; verified all 132 drugs
+   the cohort actually schedules are in it.
+3. **All non-demo patients "Smith" → 50 distinct surnames.** `idx // len(FIRST_NAMES)` was
+   `0` for every index below 52; now `idx % len(LAST_NAMES)`. 52 and 51 are coprime so the
+   (first, last) pair doesn't repeat for 2652 indices. Also removed a duplicate "Peterson".
+
+> ⚠️ **A fourth bug, found only by running the generator twice and diffing:
+> `datetime.now()` leaked wall-clock microseconds into `created_at`, so
+> `synthetic_patients_raw` and `synthetic_schedules_raw` were NOT deterministic
+> across runs** despite the module docstring claiming seed=42 determinism.
+> `synthetic_dose_events_raw` *was* deterministic — it already date-truncated —
+> which is exactly why this hid: two of three tables drifted and the third didn't,
+> so any spot-check of the big table would have looked fine. Fixed with a single
+> `GENERATION_ANCHOR` (date-truncated) that every timestamp derives from.
+
+> ⚠️ **Margaret Demo's demo numbers are now PINNED, and this is load-bearing —
+> do not replace `DEMO_BASE_ADHERENCE` with a `Beta(8,2)` draw.** Her
+> `base_adherence` used to come from the *shared* RNG stream, whose position
+> depends on how much randomness every earlier patient consumed. Fixing the drug
+> list (bug 2) changed how many draws `np.random.choice` makes — which silently
+> re-rolled Margaret from ~44% to **27.8%** adherence. No error, no warning, and
+> it would have broken `setup/phase1_checkpoint.sql`'s 44% assertion,
+> `get_adherence_stats.sql`'s two regression cells, `docs/demo_script.md`, and
+> `evals/safety_judge.md` all at once. `DEMO_BASE_ADHERENCE = 0.66` was found by
+> grid search against real generator output (the weekend/bad-week/evening
+> penalties compound, so it isn't analytically derivable) and yields 44.4%
+> overall / 75.6% metformin-evening miss — both documented figures, exactly.
+> **Lesson generalizable beyond this file: a demo fact that six documents assert
+> must not be an emergent property of a shared RNG stream.**
+
+**Still true:** nothing here has run against a live Databricks workspace. The Delta branch
+of `write_to_bronze_tables()` is unexecuted; only the local Parquet branch has actually run.
+
+### Local demo path — Today tab driven end-to-end against real Postgres (no workspace)
+
+The app now runs off-workspace far enough to exercise the **Today** tab fully:
+extract→schedule→mark-dose, all against a local Postgres standing in for
+Lakebase. Runbook: [`docs/local_dev.md`](docs/local_dev.md). The switch is one
+env var, `NEURORX_LOCAL_PG` (a libpq conninfo string), honored by both
+`app/db.py`'s pool and `lakebase/07_load_cohort.py`. Driven in a real browser
+this session; the Today tab renders Margaret's 5 doses grouped by day-part with
+working mark-taken writes (verified idempotent against the `dose_events_slot_unique`
+upsert).
+
+**Real bugs found only by actually loading + running, not by reading:**
+1. **Transaction poisoning in `07_load_cohort.py`.** `build_drug_name_to_rxcui_map`
+   queried a non-existent `neurorx.gold.drugs`, caught the error with a bare
+   `pass`, but did **not** roll back — leaving the connection ABORTED so every
+   later insert died with `InFailedSqlTransaction`. Same hazard CLAUDE.md already
+   flags for Task 3.5. Fixed with `conn.rollback()` in the except.
+2. **Generator vs. schema conflict on `actioned_ts`.** Task 1.4 jittered
+   `actioned_ts` ±45min (allowing actions *before* planned); Task 3.1's frozen
+   `dose_events_actioned_after_planned` CHECK forbids it. The contract is frozen,
+   so the generator yielded: jitter is now non-negative. Status-based adherence
+   figures unaffected.
+3. **pandas NaT not mapped to SQL NULL.** The Parquet reader's `to_dict` yielded
+   `NaT` for null `actioned_ts`; psycopg serialized it as a garbage overflow
+   timestamp (year 48113), tripping `dose_events_actioned_consistent`. Fixed by
+   converting pandas-null scalars to `None` in the reader.
+4. **`SQL_ASCII` vs `UTF8`.** `LC_ALL=C initdb` defaults to SQL_ASCII, under
+   which psycopg3 returns `bytes` for text columns (Margaret's name came back
+   `b'Margaret Demo'`). A harness artifact, not a code bug — recreate the local
+   DB as UTF8 to mirror real Lakebase. Documented in the runbook.
+5. **Multi-minute hangs on workspace-only paths.** Dashboard's
+   `get_warehouse_http_path()` and Chat's `chat()`/`chat_stream()` retried the
+   placeholder host for 2+ minutes before failing. Added fast-fail guards keyed
+   on `NEURORX_LOCAL_PG` (0.00s now) plus graceful in-UI degradation messages in
+   both views, instead of a hung spinner or raw traceback.
+
+**App package fix (also fixes the deployed path).** There was no `app/__init__.py`
+and nothing put the repo root on `sys.path`, so `streamlit run app/app.py` died
+with `No module named 'app.views'` — and `app.yaml`'s `command` would have hit
+the same wall on the deployed App. Fixed with a real `app/__init__.py` plus a
+`sys.path` bootstrap in `app.py` derived from `__file__`.
+
+**What the local path still cannot exercise:** the Delta branch of the cohort
+writer, `gold.adherence_facts` and the whole Lakeflow pipeline, Vector Search,
+the agent endpoint, the guardrail's live Haiku judge, and CDF sync — all
+workspace-only. The `fill_missing_rxcuis` synthetic-RxCUI placeholders (107 of
+132 cohort drugs) are a local-only stand-in for the real `gold.drugs` resolution.
+
+### Full-project audit (every source + md file) — 7 findings, all fixed
+
+A line-by-line sweep of all ~50 files (~19.3k lines) found and fixed:
+
+1. **`adherence_facts` name-vs-RxCUI join — the whole demo silently broke.**
+   `bronze.synthetic_dose_events_raw.rxcui` holds drug *names* (Task 1.4's
+   documented placeholder); `medallion_pipeline.py` joined it against
+   `silver.drugs.rxcui` (numeric) → zero matches → `drug_name` NULL on every
+   adherence row → checkpoint queries 6b/6c return nothing and
+   `get_adherence_stats`' most-missed metrics all break, silently. Same shape
+   as checkpoint 6c's earlier bug, one level deeper. Fixed with a
+   dual-condition join (numeric rxcui OR lowercase name), DuckDB-verified for
+   both shapes plus the no-fan-out property; works on both sides of the
+   Phase-3 `SOURCE_TABLE` flip.
+2. **Guardrail whole-response escalation bypass.** Any response containing
+   "911"/"988"/etc. *anywhere* skipped both guardrail layers entirely — so
+   "take a double dose... if worried call 911" passed unchecked. Now only the
+   marker-bearing *sentence* is exempt from Layer 1 (the requirement's actual
+   intent); verified with the exact bypass fixture.
+3. **Guardrail judge crash path.** `_call_layer2_judge` propagated any
+   network/import error, crashing `chat()` — now fail-safe BLOCK (same
+   asymmetry as the unparseable-verdict default), verified by running
+   `check()` with no reachable endpoint.
+4. **Chat view reported "Schedule updated." on error.** `manage_schedule`'s
+   `{"error": ...}` shape has no `status` key, so both the extraction-confirm
+   and pending-confirmation-card paths fell through to success. Both now
+   surface the error and keep the card open; needs_review drugs (rxcui=None /
+   times_per_day=None) are also caught client-side before submission.
+5. **Reminders job midnight blind spot.** `find_doses_due_soon` generated
+   slots from `CURRENT_DATE` only — a 23:30 run could never see a 00:15 dose.
+   Candidate set now spans today+tomorrow (window unchanged); verified against
+   real Postgres including idempotent double-processing. Also gained
+   `NEURORX_LOCAL_PG` parity with `db.py`/the loader.
+6. **Eval harness's private citation-regex copy** (the drift
+   `guardrail.py`'s own docstring flagged) — now imports
+   `app.agent_client.CHUNK_ID_PATTERN` like everything else.
+7. **Doc drift:** README/ARCHITECTURE claimed the cohort uses
+   "dbldatagen / Faker" (it's a deterministic numpy generator);
+   `manage_schedule.py` still said "Task 1.4 (still broken)".
+
+Not changed, deliberately: `chat_stream()` remains un-guardrailed (a known,
+documented Task-4.5 scope gap — needs a design decision, not a drive-by fix);
+`update_timing`'s partial dose_times/times_per_day mismatch is enforced only
+DB-side (poor error message, correct behavior); `evals/02`'s
+`RetrievalGroundedness` SCORER_ERROR behavior is documented-intentional.
 
 > ⚠️ **Task 1.8 (`setup/phase1_checkpoint.sql`) is well-built — correct table names
 > throughout, matches the frozen contract, correct lexicographic canonical-order check —
@@ -1510,6 +1633,12 @@ this project), so a stale or optimistic status note can persist and compound.
 - **No `databricks` CLI installed.** Workspace exists but is unwired locally.
 - **Python 3.14.6, PEP 668-managed** — `pip install` to system Python fails. `requests`
   is not installed system-wide. Use a venv in the scratchpad for local testing.
+- **`requirements.txt` + `requirements-dev.txt` exist at repo root** (added after the
+  observation that `app/app.yaml` runs `streamlit run app.py` with no manifest anywhere).
+  All versions resolved live against the PyPI JSON API. The split is deliberate: the app's
+  runtime deps vs. ingestion/verification extras the deployed app never imports. The
+  *agent's* deps are a third, separate list in `agent/log_agent.py`'s `pip_requirements=` —
+  it runs in a Model Serving container, not the app's. Don't consolidate the three.
 - The `.claude/projects/` memory dir moved when the project directory was renamed
   (it briefly had a trailing dot). Memories were migrated from
   `-Users-guts-Projects--NeuroRx-AI-` to `-Users-guts-Projects--NeuroRx-AI`.
