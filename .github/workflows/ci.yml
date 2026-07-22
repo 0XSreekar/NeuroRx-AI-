@@ -1,0 +1,34 @@
+name: CI
+
+# The only tests in this repo that run without a live Databricks workspace,
+# Spark, or network. Everything else (Lakeflow pipeline, Vector Search, the
+# agent endpoint, CDF sync) is workspace-only and cannot run in CI - see
+# CLAUDE.md. This gate covers the pure-Python logic that has already caught
+# real bugs by being run rather than read.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  logic-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Chunking self-test (stdlib only, deterministic)
+        run: python -I pipelines/chunking.py
+
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Byte-compile every module
+        run: python -m compileall -q agent app data lakebase pipelines evals

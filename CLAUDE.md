@@ -720,6 +720,21 @@ runs the generator twice into temp dirs; needs no Spark, no workspace, no networ
 > **Lesson generalizable beyond this file: a demo fact that six documents assert
 > must not be an emergent property of a shared RNG stream.**
 
+> ⚠️ **DRIFT FOUND (unresolved, flagged not fixed):** running `verify_cohort.py`
+> now shows the metformin **evening miss rate at 81.1%, not the documented
+> 75.6%** — outside the check's 73–78% band. Overall adherence (43.56%) still
+> passes ~44%, and evening is still correctly worse than morning, so the demo
+> story holds directionally. But the exact 75.6% figure has drifted. This is
+> the *same* emergent-RNG fragility the pinning above was meant to contain: the
+> penalties compound, so the evening-miss figure is not independently pinnable
+> without either re-grid-searching `DEMO_BASE_ADHERENCE` (which would move the
+> 44% overall) or decoupling the evening penalty from the shared stream.
+> **Do not silently chase it** by widening `verify_cohort.py`'s band or nudging
+> the constant — that trades a visible failing check for a hidden wrong number
+> across six documents. Needs a real decision: either accept 81% and update all
+> six documents' 75.6% to match, or refactor the evening penalty to be pinnable
+> on its own. Left as a failing check on purpose so it stays visible.
+
 **Still true:** nothing here has run against a live Databricks workspace. The Delta branch
 of `write_to_bronze_tables()` is unexecuted; only the local Parquet branch has actually run.
 
