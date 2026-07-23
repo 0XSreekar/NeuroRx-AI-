@@ -474,4 +474,27 @@ if __name__ == "__main__":
         assert row["chunk_id"] == expected_id, f"chunk_id mismatch: {row['chunk_id']} != {expected_id}"
     print("chunk_id format: PASSED (matches DATA_CONTRACTS.md §4.2's concat_ws formula)")
 
+    # --- pathological single-oversized-sentence case ---
+    # A paragraph that is ONE indivisible sentence longer than hard_max must
+    # still become its own chunk rather than being dropped or silently split
+    # mid-sentence — the documented exception to the "every chunk <= hard_max"
+    # rule (see pack_sentences_into_chunks' docstring, requirement 1). This is
+    # the one case where a chunk's token_count legitimately exceeds
+    # HARD_MAX_TOKENS, and it had no regression guard before.
+    _oversized_sentence = "renal clearance considerations include " + ("factor " * 900).strip()
+    assert len(split_into_sentences(_oversized_sentence)) == 1, (
+        "test fixture must be a single sentence to exercise this case"
+    )
+    oversized_rows = chunk_section("11289", "oversized-set-id", "warfarin", "warnings", [_oversized_sentence])
+    assert len(oversized_rows) == 1, (
+        f"an indivisible oversized sentence must yield exactly one chunk, got {len(oversized_rows)}"
+    )
+    assert oversized_rows[0]["token_count"] > HARD_MAX_TOKENS, (
+        "the oversized-sentence chunk should exceed hard_max — that is the documented exception being guarded"
+    )
+    assert oversized_rows[0]["chunk_text"] in strip_boilerplate(_oversized_sentence), (
+        "the oversized chunk must still be verbatim (no truncation to fit hard_max)"
+    )
+    print("Oversized-sentence case: PASSED (indivisible over-hard-max sentence kept as one verbatim chunk)")
+
     print("\nALL SELF-TESTS PASSED")
