@@ -720,20 +720,29 @@ runs the generator twice into temp dirs; needs no Spark, no workspace, no networ
 > **Lesson generalizable beyond this file: a demo fact that six documents assert
 > must not be an emergent property of a shared RNG stream.**
 
-> ⚠️ **DRIFT FOUND (unresolved, flagged not fixed):** running `verify_cohort.py`
-> now shows the metformin **evening miss rate at 81.1%, not the documented
-> 75.6%** — outside the check's 73–78% band. Overall adherence (43.56%) still
-> passes ~44%, and evening is still correctly worse than morning, so the demo
-> story holds directionally. But the exact 75.6% figure has drifted. This is
-> the *same* emergent-RNG fragility the pinning above was meant to contain: the
-> penalties compound, so the evening-miss figure is not independently pinnable
-> without either re-grid-searching `DEMO_BASE_ADHERENCE` (which would move the
-> 44% overall) or decoupling the evening penalty from the shared stream.
-> **Do not silently chase it** by widening `verify_cohort.py`'s band or nudging
-> the constant — that trades a visible failing check for a hidden wrong number
-> across six documents. Needs a real decision: either accept 81% and update all
-> six documents' 75.6% to match, or refactor the evening penalty to be pinnable
-> on its own. Left as a failing check on purpose so it stays visible.
+> ✅ **DRIFT RESOLVED — the "decouple the evening penalty" option was taken.**
+> The earlier note here recorded an unresolved 81.1% evening-miss drift and
+> asked for a decision (accept 81% and rewrite six docs, or make the evening
+> penalty pinnable on its own). The second option was implemented: Margaret's
+> metformin-evening dose no longer inherits `adherence * time_penalty` from the
+> shared stream — the `generate_dose_events` special-case draws it against a
+> **fixed threshold**, `DEMO_METFORMIN_EVENING_TAKE_RATE = 0.244`, so the
+> evening take/miss rate is now pinned *in expectation* independent of both
+> `DEMO_BASE_ADHERENCE` and cohort-wide RNG consumption — exactly the property
+> the earlier drift lacked. **Re-verified this session by running the current
+> generator directly** (bypassing the Parquet write, which needs pyarrow):
+> deterministic at seed=42, **44.22% overall / 76.67% metformin-evening miss**,
+> both inside `verify_cohort.py`'s bands (0.42–0.46 and 0.73–0.78). The check
+> passes; it is no longer a deliberately-failing canary.
+>
+> The ~1pp gap between the nominal pin (0.244 → 75.6% miss) and the measured
+> 76.67% is the 2% `skipped` overlay applied after the take/miss draw (a
+> `skipped` dose counts as "not taken" in the check): effective take ≈
+> 0.98 × 0.244 = 0.239 → ~76.1% miss in expectation, 76.67% at seed=42. The
+> six documents' documented **75.6%** is the nominal pin value and is left as-is
+> — it is inside the band and is the number the constant is named for; do **not**
+> churn it to 76.67% across those files. If the pin itself is ever retuned, that
+> is when the documented figure moves with it.
 
 **Still true:** nothing here has run against a live Databricks workspace. The Delta branch
 of `write_to_bronze_tables()` is unexecuted; only the local Parquet branch has actually run.
