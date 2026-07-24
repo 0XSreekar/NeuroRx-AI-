@@ -35,9 +35,17 @@ from pathlib import Path
 # Deriving the root from `__file__` rather than cwd makes both launch paths work
 # identically, which matters because the deployed app and local dev must not
 # diverge here. Found by actually running the app, not by reading it.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+# Force the repo root to the FRONT of sys.path, ahead of Streamlit's script
+# directory (`app/`). A plain `if _REPO_ROOT not in sys.path` guard is not
+# enough: when the repo root is already present but at a *later* position than
+# `app/` (e.g. PYTHONPATH includes it, or the deployed App host adds it), the
+# guard skips and `app/app.py` shadows the `app` package —
+# "No module named 'app.views'; 'app' is not a package". Remove any existing
+# occurrence, then insert at position 0 so the package always wins.
+while _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 import streamlit as st
 

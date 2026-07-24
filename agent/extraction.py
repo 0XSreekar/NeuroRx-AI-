@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
@@ -195,6 +196,231 @@ def _call_fm_extraction(input_data: bytes | str, is_image: bool) -> str:
     return response.content
 
 
+# ---------------------------------------------------------------------------
+# Local-demo text extraction (no workspace / no FM endpoint)
+# ---------------------------------------------------------------------------
+#
+# On the off-workspace demo path (NEURORX_LOCAL_PG set, docs/local_dev.md) there
+# is no multimodal FM endpoint to call. This heuristic parser turns typed
+# prescription TEXT into the exact same four-field dicts _call_fm_extraction
+# would return ({drug_name, strength, frequency_text, timing_notes}), so the
+# Create flow (extract -> normalize -> resolve -> propose) runs end to end
+# locally against the live RxNorm API. It is deliberately literal transcription
+# only, per EXTRACTION_PROMPT's own contract — all clinical interpretation still
+# happens downstream in normalize()/resolve(), never here. Photos are not
+# supported (no local OCR/vision); the caller is told to paste text instead.
+
+_STRENGTH_RE = re.compile(
+    r"\d+(?:\.\d+)?\s?(?:mg|mcg|g|ml|units?|iu|%)\b", re.IGNORECASE
+)
+_DOSAGE_FORM_RE = re.compile(
+    r"^(?:tab(?:let)?|cap(?:sule)?|syp|syrup|susp(?:ension)?|inj(?:ection)?|"
+    r"sol(?:ution)?|drops?|cream|ointment|gel|lotion|spray|patch|"
+    r"supp(?:ository)?)\.?\s+",
+    re.IGNORECASE,
+)
+_ITEM_MARKER_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
+_FREQ_HINT_RE = re.compile(
+    r"\b(?:take|apply|use|bid|tid|qid|q\.?\d+\.?h|qhs|qam|qpm|qod|qd|od|hs|prn|"
+    r"once|twice|thrice|three times|four times|daily|nightly|bedtime|morning|"
+    r"evening|night|every\s+\d+\s+hours?|as needed|po|per day|a day)\b",
+    re.IGNORECASE,
+)
+_TIMING_HINT_RE = re.compile(
+    r"(with food|after (?:meals?|food)|before (?:meals?|food)|empty stomach|"
+    r"with (?:a )?(?:full )?glass of water|avoid grapefruit|with water)",
+    re.IGNORECASE,
+)
+
+
+def _split_into_med_blocks(text: str) -> list[list[str]]:
+    """Group the pasted/OCR'd text into one block of lines per medication.
+
+    Two strategies, chosen automatically:
+
+    * **Explicit item markers** (``1.`` / ``2)`` / ``-`` / ``•``): a new block
+      starts at each marker, so a drug's sig/duration lines stay with it.
+    * **Otherwise, content-driven:** a new block starts at each line carrying a
+      drug strength (``500 mg``) or a frequency hint — the reliable signal that
+      a new medication has begun. Header lines (``Rx:``, ``Patient:`` …) close
+      the current block and are dropped, and continuation lines (a bare sig with
+      neither strength nor a new drug) attach to the open block. This is what
+      keeps an ``Rx:`` header from swallowing the first real drug when OCR emits
+      no numbered list — the bug the blank-line split had.
+    """
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+
+    if any(_ITEM_MARKER_RE.match(ln) for ln in lines):
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for ln in lines:
+            if _ITEM_MARKER_RE.match(ln) and current:
+                blocks.append(current)
+                current = [ln]
+            else:
+                current.append(ln)
+        if current:
+            blocks.append(current)
+        return blocks
+
+    blocks: list[list[str]] = []
+    current: Optional[list[str]] = None
+    for ln in lines:
+        if _NON_DRUG_LABEL_RE.match(ln.strip()):
+            if current:
+                blocks.append(current)
+                current = None
+            continue
+        if _STRENGTH_RE.search(ln):
+            # A strength always marks the start of a new medication.
+            if current:
+                blocks.append(current)
+            current = [ln]
+        elif current is not None:
+            # A continuation line (sig/duration) for the open drug.
+            current.append(ln)
+        elif _FREQ_HINT_RE.search(ln):
+            # A drug line with a frequency but no strength, none open yet.
+            current = [ln]
+        # else: preamble noise before any drug — dropped
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+# Header/metadata lines that appear in real prescriptions but are NOT drugs.
+# A line starting with one of these labels (e.g. "Patient: Sarah Wilson",
+# "Diagnosis: Atrial Fibrillation") is skipped outright.
+_NON_DRUG_LABEL_RE = re.compile(
+    r"^\s*(?:patient|name|age|sex|gender|dob|date of birth|date|doctor|dr|"
+    r"physician|prescriber|diagnosis|dx|indication|rx|prescription|address|"
+    r"mrn|clinic|hospital|refills?|qty|quantity|sig|notes?|allergies|weight|"
+    r"height|bp|pulse|signature)\b\s*[:.\-]",
+    re.IGNORECASE,
+)
+
+
+def _parse_one_block(block_lines: list[str]) -> Optional[dict]:
+    """Extract the four literal fields from one medication block. Returns None
+    when the block is not a medication — a header/metadata line (patient name,
+    diagnosis, date), or a line carrying neither a strength nor a frequency,
+    which a real drug order always has at least one of. This is what keeps a
+    pasted prescription's patient/diagnosis lines out of the drug list."""
+    first = _ITEM_MARKER_RE.sub("", block_lines[0]).strip()
+    if _NON_DRUG_LABEL_RE.match(first):
+        return None
+    first = _DOSAGE_FORM_RE.sub("", first).strip()
+    whole = " ".join(_ITEM_MARKER_RE.sub("", ln).strip() for ln in block_lines)
+
+    strength_m = _STRENGTH_RE.search(first) or _STRENGTH_RE.search(whole)
+    strength = strength_m.group(0).strip() if strength_m else ""
+
+    # Frequency = the sig line(s) that carry a frequency hint, verbatim.
+    freq_parts = [
+        _ITEM_MARKER_RE.sub("", ln).strip()
+        for ln in block_lines
+        if _FREQ_HINT_RE.search(_ITEM_MARKER_RE.sub("", ln))
+    ]
+    frequency_text = " ".join(freq_parts).strip()
+
+    # A real medication order carries a strength OR a frequency (usually both).
+    # A block with neither is a diagnosis/name/header, not a drug — drop it
+    # rather than emit an unresolvable "uncertain match" row that blocks the
+    # whole batch at confirm time.
+    if not strength and not frequency_text:
+        return None
+
+    # Drug name = the first line up to its first digit (strength/quantity).
+    drug_name = re.split(r"\d", first, 1)[0].strip(" .,:;-").strip()
+    if not drug_name:
+        return None
+
+    timing_m = _TIMING_HINT_RE.search(whole)
+    timing_notes = timing_m.group(0).strip() if timing_m else ""
+
+    return {
+        "drug_name": drug_name,
+        "strength": strength,
+        "frequency_text": frequency_text,
+        "timing_notes": timing_notes,
+    }
+
+
+def _parse_prescription_text(text: str) -> list[dict]:
+    drugs = []
+    for block in _split_into_med_blocks(text):
+        if block:
+            parsed = _parse_one_block(block)
+            if parsed:
+                drugs.append(parsed)
+    return drugs
+
+
+def _ocr_image_to_text(image_bytes: bytes) -> str:
+    """Local OCR fallback for the photo path: Tesseract via pytesseract. The
+    deployed app uses the Databricks multimodal vision model instead — this is a
+    local-demo stand-in only, and its accuracy depends entirely on Tesseract and
+    the image quality. Raises `ExtractionError` with an actionable message if the
+    OCR engine isn't installed or the image can't be read, so the app surfaces a
+    clear reason rather than a raw ImportError."""
+    try:
+        import io
+
+        import pytesseract
+        from PIL import Image
+    except ImportError as exc:
+        raise ExtractionError(
+            "Photo extraction on the local demo needs the Tesseract OCR engine "
+            "and its Python bindings (`pip install pytesseract pillow`, plus the "
+            "`tesseract` binary). Paste the prescription as text instead."
+        ) from exc
+
+    # Point pytesseract at the binary explicitly if it isn't on PATH — a
+    # Streamlit process launched via nohup/systemd may not inherit Homebrew's
+    # /opt/homebrew/bin. shutil.which respects PATH first; the fallbacks cover
+    # the standard Homebrew (Apple Silicon / Intel) install locations.
+    import shutil
+
+    found = shutil.which("tesseract")
+    for candidate in (found, "/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract"):
+        if candidate and os.path.exists(candidate):
+            pytesseract.pytesseract.tesseract_cmd = candidate
+            break
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        return pytesseract.image_to_string(image)
+    except pytesseract.TesseractNotFoundError as exc:
+        raise ExtractionError(
+            "The Tesseract OCR binary isn't installed (`brew install tesseract`). "
+            "Paste the prescription as text instead."
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 — any decode/OCR failure → one clear msg
+        raise ExtractionError(
+            f"Couldn't read text from that image ({type(exc).__name__}). Try a "
+            "clearer photo, or paste the prescription as text instead."
+        ) from exc
+
+
+def _local_text_extraction(input_data: bytes | str, is_image: bool) -> str:
+    """Stand-in for `_call_fm_extraction` on the local demo path. Returns the
+    same JSON-array-string contract so `extract()`'s parsing is unchanged.
+    Photos are OCR'd locally with Tesseract (`_ocr_image_to_text`) and then run
+    through the same text parser; on a real workspace the multimodal FM does
+    both steps."""
+    if is_image:
+        if not isinstance(input_data, (bytes, bytearray)):
+            raise ExtractionError("Expected image bytes for the photo path.")
+        text = _ocr_image_to_text(bytes(input_data))
+    else:
+        text = (
+            input_data.decode("utf-8", "replace")
+            if isinstance(input_data, (bytes, bytearray))
+            else str(input_data)
+        )
+    return json.dumps(_parse_prescription_text(text))
+
+
 def extract(
     input_data: bytes | str,
     is_image: bool = False,
@@ -205,8 +431,17 @@ def extract(
     dicts. Retries the FM call exactly once on a parse failure (after client-side
     defensive parsing — fence-stripping and bracket-extraction — has already
     been tried and still failed), then raises `ExtractionError`.
+
+    When no explicit `_fm_call` is injected, the default depends on mode:
+    `NEURORX_LOCAL_PG` set (off-workspace demo) uses the local text parser
+    `_local_text_extraction`; otherwise the real `_call_fm_extraction` FM call.
     """
-    call = _fm_call or _call_fm_extraction
+    if _fm_call is not None:
+        call = _fm_call
+    elif os.getenv("NEURORX_LOCAL_PG"):
+        call = _local_text_extraction
+    else:
+        call = _call_fm_extraction
 
     raw = call(input_data, is_image)
     try:
