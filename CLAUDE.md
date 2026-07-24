@@ -747,11 +747,62 @@ runs the generator twice into temp dirs; needs no Spark, no workspace, no networ
 **Still true:** nothing here has run against a live Databricks workspace. The Delta branch
 of `write_to_bronze_tables()` is unexecuted; only the local Parquet branch has actually run.
 
-### Local demo path — Today tab driven end-to-end against real Postgres (no workspace)
+### Local demo path — Today AND Create driven end-to-end against real Postgres (no workspace)
 
-The app now runs off-workspace far enough to exercise the **Today** tab fully:
-extract→schedule→mark-dose, all against a local Postgres standing in for
-Lakebase. Runbook: [`docs/local_dev.md`](docs/local_dev.md). The switch is one
+The app now runs off-workspace far enough to exercise **both the Today tab and
+the full Create flow**: paste prescription text → Extract → confirm → the new
+schedule appears in Today → mark-dose — all against a local Postgres standing in
+for Lakebase, with live RxNorm resolution. Runbook:
+[`docs/local_dev.md`](docs/local_dev.md).
+
+**Dashboard also works locally now** (gated on `NEURORX_LOCAL_PG`): `app/db.py`
+gained `get_patient` (name + active meds), `_adherence_summary_local`, and
+`_get_adherence_stats_local` — the last two recompute the same aggregates the
+workspace reads from `gold.adherence_facts` (Delta) directly from local
+`dose_events` joined to `schedules`, with the same window (days ending
+yesterday, today excluded), day-part boundaries, and taken/planned adherence
+(skips count against, per F4). `adherence_summary`/`get_adherence_stats` route to
+these when `NEURORX_LOCAL_PG` is set. `app/views/dashboard.py` gained a patient
+header (name + medication list) and a mode-aware source caption. Verified
+against Margaret: 43% (30-day window), most-missed **metformin**, most-missed
+**evening** — matches her pinned demo story. The streak is a local
+reimplementation of the UC function's "consecutive fully-taken days ending
+yesterday" (no UC function to call locally) — flagged in the docstring.
+Note `dose_events` has no `rxcui` column (it lives on `schedules`) — the join
+carries it.
+
+**Create works locally via two additions (both gated on `NEURORX_LOCAL_PG`):**
+1. `agent/extraction.py` — `_local_text_extraction` / `_parse_prescription_text`:
+   a heuristic text parser that produces the exact four-field FM output shape
+   ({drug_name, strength, frequency_text, timing_notes}) from typed prescription
+   text, so `extract()→normalize()→resolve()→propose()` runs with no multimodal
+   FM endpoint. `extract()` picks this over `_call_fm_extraction` when
+   `NEURORX_LOCAL_PG` is set. Verified end-to-end against
+   live RxNorm (Metformin→6809 2x/day, Lisinopril→29046 1x/day morning,
+   Cetirizine→20610 1x/day bedtime, Amoxicillin→723 3x/day).
+   **Photos now work locally via Tesseract OCR** (`_ocr_image_to_text`;
+   `brew install tesseract` + `pip install pytesseract pillow`): image is OCR'd,
+   then run through the same text parser. Deployed app uses the Databricks
+   vision model instead — OCR is a local stand-in, accuracy depends on Tesseract
+   + image quality. `pytesseract.tesseract_cmd` is set from
+   `shutil.which`/Homebrew paths so a nohup Streamlit that didn't inherit
+   `/opt/homebrew/bin` still finds the binary; a missing engine raises a clear
+   `ExtractionError`. **Parser robustness:** `_split_into_med_blocks` is
+   content-driven with no numbered markers — a new drug starts at each line with
+   a strength or frequency; header lines (`Rx:`, `Patient:`) are dropped. Fixed
+   a real bug where an `Rx:` header swallowed the first drug in marker-less OCR
+   output (Warfarin dropped, only Aspirin survived).
+2. `app/db.py` — `create_schedules_local`, routed from
+   `agent_client.call_manage_schedule` in local mode: a direct insert into the
+   local `schedules` table (all its CHECK constraints still enforce
+   numeric-rxcui and times_per_day==cardinality(dose_times)). **It does NOT run
+   the interaction-check gate** the real `manage_schedule` UC function does
+   (no `gold.interaction_pairs` locally) — documented in both function
+   docstrings, not silently skipped. Other actions return a clear
+   "needs the workspace" error instead of hanging on the unreachable warehouse.
+   Before this, the Extract button crashed with a raw
+   `No module named 'databricks_langchain'` — the FM path importing that at call
+   time; the local path never imports it. The switch is one
 env var, `NEURORX_LOCAL_PG` (a libpq conninfo string), honored by both
 `app/db.py`'s pool and `lakebase/07_load_cohort.py`. Driven in a real browser
 this session; the Today tab renders Margaret's 5 doses grouped by day-part with
@@ -788,6 +839,20 @@ and nothing put the repo root on `sys.path`, so `streamlit run app/app.py` died
 with `No module named 'app.views'` — and `app.yaml`'s `command` would have hit
 the same wall on the deployed App. Fixed with a real `app/__init__.py` plus a
 `sys.path` bootstrap in `app.py` derived from `__file__`.
+
+> ⚠️ **That bootstrap had a latent second bug, found only by re-running the app
+> with the repo root already on `PYTHONPATH`.** The guard was
+> `if str(_REPO_ROOT) not in sys.path: sys.path.insert(0, ...)`. When the repo
+> root is *already* present but at a **later** position than Streamlit's script
+> dir (`app/`) — which happens under `PYTHONPATH=$repo_root`, and can happen on
+> the deployed Databricks App host — the guard skips, `app/` stays first, and
+> `app/app.py` shadows the `app` package → the exact
+> `No module named 'app.views'; 'app' is not a package` error again. Fixed to
+> unconditionally move the repo root to the front:
+> `while _REPO_ROOT in sys.path: sys.path.remove(_REPO_ROOT); sys.path.insert(0, _REPO_ROOT)`.
+> Re-verified: app boots and the Today tab renders Margaret's 5 doses live in a
+> real browser against local Postgres, with a working next-dose countdown and
+> mark-taken writes.
 
 **What the local path still cannot exercise:** the Delta branch of the cohort
 writer, `gold.adherence_facts` and the whole Lakeflow pipeline, Vector Search,

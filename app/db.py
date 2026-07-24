@@ -65,7 +65,8 @@ of scope").
 
 from __future__ import annotations
 
-from datetime import datetime
+import os
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 import streamlit as st
@@ -244,6 +245,54 @@ def todays_doses(patient_id: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Writes
 # ---------------------------------------------------------------------------
+
+
+def create_schedules_local(patient_id: str, drugs: list[dict]) -> dict:
+    """Insert confirmed extraction drugs as active schedules in local Postgres.
+
+    **Local-demo path only** (`NEURORX_LOCAL_PG`). On a real workspace the app
+    goes through the `neurorx.app.manage_schedule` UC function
+    (`agent_client.call_manage_schedule`), which also runs the mandatory
+    interaction-check gate before any drug is added (Task 2.3). That gate reads
+    `gold.interaction_pairs`, which does not exist locally — so this local
+    insert does **not** perform an interaction check, and callers/UI should not
+    imply it did. It exists purely so the Create flow (paste → extract →
+    confirm → appears in Today) is demonstrable off-workspace.
+
+    Each drug must already be resolved: `rxcui` a numeric string,
+    `times_per_day` an int, `dose_times` a list of ``HH:MM:SS`` strings whose
+    length equals `times_per_day` (the same shape `manage_schedule`'s
+    `create_from_extraction` requires). The `schedules` table's own CHECK
+    constraints (numeric rxcui, times_per_day == cardinality(dose_times))
+    enforce this server-side — a bad row raises rather than corrupting Today.
+    """
+    inserted = []
+    with _get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            for d in drugs:
+                cur.execute(
+                    """
+                    INSERT INTO schedules
+                        (patient_id, rxcui, drug_name, dose_text,
+                         times_per_day, dose_times, timing_notes, status)
+                    VALUES
+                        (%(patient_id)s, %(rxcui)s, %(drug_name)s, %(dose_text)s,
+                         %(times_per_day)s, %(dose_times)s::time[],
+                         %(timing_notes)s, 'active')
+                    RETURNING schedule_id, drug_name
+                    """,
+                    {
+                        "patient_id": patient_id,
+                        "rxcui": str(d.get("rxcui")),
+                        "drug_name": d.get("drug_name"),
+                        "dose_text": d.get("dose_text") or "",
+                        "times_per_day": d.get("times_per_day"),
+                        "dose_times": list(d.get("dose_times") or []),
+                        "timing_notes": d.get("timing_notes"),
+                    },
+                )
+                inserted.append(dict(cur.fetchone()))
+    return {"status": "created", "count": len(inserted), "schedules": inserted}
 
 
 def mark_dose(
@@ -475,6 +524,179 @@ def sql_connect():
     )
 
 
+# ---------------------------------------------------------------------------
+# Local-demo analytics (computed from local Postgres dose_events, not Delta)
+# ---------------------------------------------------------------------------
+#
+# On a real workspace the Dashboard reads pre-aggregated `gold.adherence_facts`
+# (Delta) via the SQL warehouse — the F9 OLTP-vs-analytics split. That table
+# does not exist locally. These functions recompute the same aggregates
+# directly from local `dose_events` (joined to `schedules` for drug_name) so the
+# Dashboard is demonstrable off-workspace. Same window rule as the UC function
+# (Task 2.4): whole days ending yesterday, today excluded; same day-part
+# boundaries as `todays_doses()` / `_day_part_expr()`; adherence = taken/planned
+# (skips count against it, per F4). The streak is a local reimplementation of
+# the UC function's "consecutive fully-taken days ending yesterday" — acceptable
+# here because there is no UC function to call locally, flagged as such.
+
+_LOCAL_DAY_PART_CASE = """
+    CASE
+        WHEN EXTRACT(HOUR FROM de.planned_ts) >= 5
+         AND EXTRACT(HOUR FROM de.planned_ts) < 12 THEN 'morning'
+        WHEN EXTRACT(HOUR FROM de.planned_ts) >= 12
+         AND EXTRACT(HOUR FROM de.planned_ts) < 17 THEN 'afternoon'
+        WHEN EXTRACT(HOUR FROM de.planned_ts) >= 17
+         AND EXTRACT(HOUR FROM de.planned_ts) < 21 THEN 'evening'
+        ELSE 'night'
+    END
+"""
+
+
+def get_patient(patient_id: str) -> Optional[dict]:
+    """The patient's display name + their active medication list, from local
+    Postgres. Used by the Dashboard header so it shows a real name and drugs
+    rather than a bare UUID. Returns None if the patient row does not exist."""
+    with _get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT patient_id, display_name, caregiver_name "
+                "FROM patients WHERE patient_id = %(pid)s",
+                {"pid": patient_id},
+            )
+            patient = cur.fetchone()
+            if patient is None:
+                return None
+            cur.execute(
+                """
+                SELECT drug_name, rxcui, dose_text, times_per_day, dose_times,
+                       timing_notes
+                FROM schedules
+                WHERE patient_id = %(pid)s AND status = 'active'
+                ORDER BY drug_name
+                """,
+                {"pid": patient_id},
+            )
+            meds = [dict(r) for r in cur.fetchall()]
+    return {
+        "patient_id": str(patient["patient_id"]),
+        "display_name": patient["display_name"],
+        "caregiver_name": patient["caregiver_name"],
+        "medications": meds,
+    }
+
+
+def _adherence_summary_local(patient_id: str, days: int = 30) -> list[dict]:
+    """Local `adherence_summary` equivalent: per (drug, day, day_part) counts,
+    computed from `dose_events` joined to `schedules`. Same columns/shape the
+    workspace version returns from `gold.adherence_facts`."""
+    with _get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"""
+                WITH ev AS (
+                    SELECT de.patient_id, s.rxcui, s.drug_name,
+                           de.planned_ts::date AS event_date,
+                           {_LOCAL_DAY_PART_CASE} AS day_part,
+                           de.status
+                    FROM dose_events de
+                    JOIN schedules s ON s.schedule_id = de.schedule_id
+                    WHERE de.patient_id = %(pid)s
+                      AND de.planned_ts::date >= CURRENT_DATE - %(days)s
+                      AND de.planned_ts::date <= CURRENT_DATE - 1
+                )
+                SELECT patient_id, rxcui, drug_name, event_date, day_part,
+                       count(*)                                    AS planned_doses,
+                       count(*) FILTER (WHERE status = 'taken')    AS taken_doses,
+                       count(*) FILTER (WHERE status = 'skipped')  AS skipped_doses,
+                       count(*) FILTER (WHERE status = 'missed')   AS missed_doses,
+                       round(100.0 * count(*) FILTER (WHERE status = 'taken')
+                             / NULLIF(count(*), 0), 1)             AS adherence_pct
+                FROM ev
+                GROUP BY patient_id, rxcui, drug_name, event_date, day_part
+                ORDER BY event_date DESC, day_part
+                """,
+                {"pid": patient_id, "days": days},
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+
+def _get_adherence_stats_local(patient_id: str, window_days: int = 30) -> dict:
+    """Local `get_adherence_stats` equivalent — aggregates the same five metrics
+    the UC function returns, from `_adherence_summary_local`'s rows in Python."""
+    empty = {
+        "overall_adherence_pct": None,
+        "current_streak_days": None,
+        "most_missed_drug": None,
+        "most_missed_daypart": None,
+        "adherence_by_drug": [],
+    }
+    rows = _adherence_summary_local(patient_id, window_days)
+    if not rows:
+        return empty
+
+    total_taken = sum(r["taken_doses"] for r in rows)
+    total_planned = sum(r["planned_doses"] for r in rows)
+
+    by_drug_taken: dict[str, int] = {}
+    by_drug_planned: dict[str, int] = {}
+    missed_by_drug: dict[str, int] = {}
+    missed_by_daypart: dict[str, int] = {}
+    day_totals: dict[date, list[int]] = {}
+    for r in rows:
+        d = r["drug_name"]
+        by_drug_taken[d] = by_drug_taken.get(d, 0) + r["taken_doses"]
+        by_drug_planned[d] = by_drug_planned.get(d, 0) + r["planned_doses"]
+        if r["missed_doses"]:
+            missed_by_drug[d] = missed_by_drug.get(d, 0) + r["missed_doses"]
+            missed_by_daypart[r["day_part"]] = (
+                missed_by_daypart.get(r["day_part"], 0) + r["missed_doses"]
+            )
+        tot = day_totals.setdefault(r["event_date"], [0, 0])
+        tot[0] += r["taken_doses"]
+        tot[1] += r["planned_doses"]
+
+    adherence_by_drug = [
+        {
+            "drug_name": name,
+            "adherence_pct": round(100.0 * by_drug_taken[name] / by_drug_planned[name], 1),
+        }
+        for name in sorted(by_drug_planned)
+        if by_drug_planned[name]
+    ]
+
+    most_missed_drug = None
+    if missed_by_drug:
+        name, cnt = sorted(missed_by_drug.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        most_missed_drug = {"drug_name": name, "missed_count": float(cnt)}
+
+    most_missed_daypart = None
+    if missed_by_daypart:
+        part, cnt = sorted(missed_by_daypart.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        most_missed_daypart = {"daypart": part, "missed_count": float(cnt)}
+
+    # Streak: consecutive fully-taken days walking back from the most recent
+    # day with data (yesterday for the synthetic cohort), clamped to the window.
+    streak = 0
+    if day_totals:
+        cursor_day = max(day_totals)
+        while streak < window_days and cursor_day in day_totals:
+            taken, planned = day_totals[cursor_day]
+            if planned > 0 and taken < planned:
+                break
+            streak += 1
+            cursor_day = cursor_day - timedelta(days=1)
+
+    return {
+        "overall_adherence_pct": (
+            round(100.0 * total_taken / total_planned, 1) if total_planned else None
+        ),
+        "current_streak_days": streak,
+        "most_missed_drug": most_missed_drug,
+        "most_missed_daypart": most_missed_daypart,
+        "adherence_by_drug": adherence_by_drug,
+    }
+
+
 def adherence_summary(patient_id: str, days: int = 30) -> list[dict]:
     """Adherence aggregates for the dashboard, read from
     `neurorx.gold.adherence_facts` via the Databricks SQL connector.
@@ -488,7 +710,14 @@ def adherence_summary(patient_id: str, days: int = 30) -> list[dict]:
     a dict of params) — NOT psycopg's `%(name)s` style used everywhere else
     in this file. Confirmed against the connector's real source this
     session; see module docstring.
+
+    **Local-demo path** (`NEURORX_LOCAL_PG`): computed from local Postgres
+    `dose_events` instead of the Delta gold table — see
+    `_adherence_summary_local`.
     """
+    if os.getenv("NEURORX_LOCAL_PG"):
+        return _adherence_summary_local(patient_id, days)
+
     with sql_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -548,7 +777,14 @@ def get_adherence_stats(patient_id: str, window_days: int = 30) -> dict:
     all) means no dose history exists for this patient/window — every field
     below is `None`/`[]` in that case, and the view must not read that as
     perfect adherence.
+
+    **Local-demo path** (`NEURORX_LOCAL_PG`): computed from local Postgres
+    `dose_events` instead of calling the UC function — see
+    `_get_adherence_stats_local`.
     """
+    if os.getenv("NEURORX_LOCAL_PG"):
+        return _get_adherence_stats_local(patient_id, window_days)
+
     with sql_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(

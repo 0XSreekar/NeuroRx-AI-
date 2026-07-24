@@ -78,6 +78,8 @@ def render(patient_id: str) -> None:
         st.info("📋 No patient selected. Choose a patient ID in the sidebar to see adherence data.")
         return
 
+    _render_patient_header(patient_id)
+
     caregiver_mode = st.toggle("👨‍👩‍👧 Caregiver Mode", value=False)
 
     with st.spinner("📊 Loading adherence data..."):
@@ -120,6 +122,45 @@ def render(patient_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Patient identity + medication list
+# ---------------------------------------------------------------------------
+
+
+def _render_patient_header(patient_id: str) -> None:
+    """Show who this dashboard is about — the patient's name and their active
+    medications — above the adherence metrics. Reads from Lakebase (local
+    Postgres on the demo path); degrades silently to just the ID if the
+    lookup isn't available so it never blocks the rest of the view."""
+    try:
+        patient = db.get_patient(patient_id)
+    except Exception:  # noqa: BLE001 — identity is nice-to-have, never fatal
+        patient = None
+
+    if not patient:
+        return
+
+    st.subheader(f"👤 {patient['display_name']}")
+    meds = patient.get("medications") or []
+    if meds:
+        st.markdown("**Current medications**")
+        for m in meds:
+            times = ", ".join(
+                t.strftime("%H:%M") if hasattr(t, "strftime") else str(t)[:5]
+                for t in (m.get("dose_times") or [])
+            )
+            notes = f" · _{m['timing_notes']}_" if m.get("timing_notes") else ""
+            per_day = m.get("times_per_day")
+            strength = m.get("dose_text") or ""
+            st.markdown(
+                f"- **{m['drug_name']}** {strength} — {per_day}×/day"
+                f"{f' at {times}' if times else ''}{notes}"
+            )
+    else:
+        st.caption("No active medications on file for this patient.")
+    st.divider()
+
+
+# ---------------------------------------------------------------------------
 # Header stat cards (Requirement 1)
 # ---------------------------------------------------------------------------
 
@@ -152,7 +193,10 @@ def _render_header_stats(stats: dict) -> None:
         time_label = most_missed_part["daypart"].title() if most_missed_part else "None (🎉 Perfect!)"
         st.metric("Most-Missed Time", time_label, help="Time of day with most missed doses")
 
-    st.caption("📊 Source: `neurorx.app.get_adherence_stats` → `neurorx.gold.adherence_facts` (Delta)")
+    if os.getenv("NEURORX_LOCAL_PG"):
+        st.caption("📊 Source: local Postgres `dose_events` (local-demo path; the deployed app reads `neurorx.gold.adherence_facts` in Delta)")
+    else:
+        st.caption("📊 Source: `neurorx.app.get_adherence_stats` → `neurorx.gold.adherence_facts` (Delta)")
 
 
 # ---------------------------------------------------------------------------

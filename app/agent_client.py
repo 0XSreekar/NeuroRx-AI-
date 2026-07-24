@@ -83,6 +83,7 @@ third kind of connection for one more call.
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from databricks.sdk import WorkspaceClient
@@ -329,7 +330,28 @@ def call_manage_schedule(patient_id: str, action: str, payload: dict) -> dict:
     confirmed against the function's own `CREATE FUNCTION` signature in
     `agent/tools/manage_schedule.py`. Parses the returned JSON string back
     into a dict before returning, so callers never handle a raw string.
+
+    **Local-demo path** (`NEURORX_LOCAL_PG`): no SQL warehouse or
+    `neurorx.app.manage_schedule` UC function is reachable, so
+    `create_from_extraction` is routed to a direct local Postgres insert
+    (`db.create_schedules_local`), which — unlike the UC function — does NOT run
+    the interaction-check gate (no `gold.interaction_pairs` locally; see that
+    function's docstring). Any other action returns a clear "needs the
+    workspace" error instead of hanging on an unreachable warehouse host.
     """
+    if os.getenv("NEURORX_LOCAL_PG"):
+        from app import db
+
+        if action == "create_from_extraction":
+            return db.create_schedules_local(patient_id, payload.get("drugs", []))
+        return {
+            "error": (
+                f"Action '{action}' needs the Databricks manage_schedule UC "
+                "function, which the local demo can't reach. Deploy to a "
+                "workspace to use it."
+            )
+        }
+
     from app.db import sql_connect
 
     with sql_connect() as conn:
