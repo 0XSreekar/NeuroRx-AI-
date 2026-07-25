@@ -11,6 +11,15 @@
 requests==2.34.2
 numpy==2.5.1
 
+# pyarrow: the parquet engine for 04_synthetic_cohort.py's local (no-Spark)
+# fallback, which calls pandas.to_parquet to write data/generated/*.parquet.
+# pandas imports its parquet engine lazily, so without this the write fails
+# deep inside pandas with "Unable to find a usable engine", and verify_cohort.py
+# (which runs the generator as a subprocess) dies before reaching a single
+# cohort assertion. Version resolved live against the PyPI JSON API; pandas
+# 2.3.3 imposes no upper bound on pyarrow.
+pyarrow==25.0.0
+
 # --- Vector Search (pipelines/05_vector_index.py) ---
 # NOTE: this package is mid-rename. Per its own PyPI README, databricks-ai-search
 # is the new name and databricks-vectorsearch>=0.74 is now a thin re-export shim

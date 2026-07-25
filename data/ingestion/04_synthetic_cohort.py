@@ -556,11 +556,22 @@ def write_to_bronze_tables(patients, schedules, dose_events, spark=None, output_
             import pandas as pd
         except ImportError:
             raise RuntimeError(
-                "Local fallback needs pandas + pyarrow: pip install -r requirements-dev.txt"
+                "Local fallback needs pandas: pip install -r requirements-dev.txt"
             )
+        # pandas.to_parquet imports its engine (pyarrow) lazily, so a missing
+        # engine surfaces here as a deep pandas ImportError ("Unable to find a
+        # usable engine"), NOT at the `import pandas` above. Guard the write
+        # itself so the failure carries the actionable fix instead of a stack
+        # trace three frames into pandas.io.parquet.
         for table_name, rows in datasets.items():
             path = out / f"{table_name}.parquet"
-            pd.DataFrame(rows).to_parquet(path, index=False)
+            try:
+                pd.DataFrame(rows).to_parquet(path, index=False)
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Local Parquet fallback needs a parquet engine (pyarrow): "
+                    "pip install -r requirements-dev.txt"
+                ) from exc
             print(f"  ✅ {path.name}: {len(rows):,} rows")
         written_to = str(out)
 
