@@ -204,6 +204,48 @@ COMMENT ON TABLE guardrail_blocks IS
     'Append-only log of every response the output guardrail blocked. Never UPDATE or DELETE a row (DATA_CONTRACTS.md §6.4) — this table is the evidence the safety net fires, credible only if nothing can quietly edit it after the fact. Home contested, see F2 above: may move to a Delta table in neurorx.evals if that recommendation is accepted.';
 
 -- =============================================================================
+-- accounts (DATA_CONTRACTS.md §6.5)
+--
+-- Application sign-in. One account owns exactly one patient
+-- (UNIQUE (patient_id)) — the 1:1 model chosen in the accounts design spec.
+--
+-- NOT an access boundary: the demo patient switcher in the app header is
+-- deliberately kept, so a signed-in account can still view any patient's
+-- data. Signing in identifies who you are; it does not restrict what you can
+-- read. See docs/superpowers/specs/2026-07-26-neurorx-accounts-auth-design.md §7.
+--
+-- accounts_email_normalized enforces normalization in the DATABASE, not only
+-- in Python: one forgotten lower() would otherwise create 'Bob@x.com'
+-- alongside 'bob@x.com' and UNIQUE (email) would never notice.
+--
+-- ON DELETE CASCADE matches patients' other children (schedules, dose_events)
+-- rather than guardrail_blocks' SET NULL — an account is not an evidence log,
+-- and a deleted patient must not leave a sign-in that resolves to nothing.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS accounts (
+    account_id     UUID        NOT NULL DEFAULT gen_random_uuid(),
+    email          TEXT        NOT NULL,
+    display_name   TEXT        NOT NULL,
+    password_hash  TEXT        NOT NULL,
+    patient_id     UUID        NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_login_at  TIMESTAMPTZ,
+
+    CONSTRAINT accounts_pkey             PRIMARY KEY (account_id),
+    CONSTRAINT accounts_email_unique     UNIQUE (email),
+    CONSTRAINT accounts_patient_unique   UNIQUE (patient_id),
+    CONSTRAINT accounts_patient_fk       FOREIGN KEY (patient_id)
+                                         REFERENCES patients (patient_id)
+                                         ON DELETE CASCADE,
+    CONSTRAINT accounts_email_normalized CHECK (email = lower(btrim(email))),
+    CONSTRAINT accounts_email_shape      CHECK (position('@' in email) > 1),
+    CONSTRAINT accounts_name_present     CHECK (length(trim(display_name)) > 0)
+);
+
+COMMENT ON TABLE accounts IS
+    'Application sign-in; one account owns exactly one patient. Stores an argon2id hash, never a plaintext password. NOT an access boundary — the demo patient switcher remains, so any signed-in account can view any patient.';
+
+-- =============================================================================
 -- notifications (Task 3.7)
 --
 -- Not in DATA_CONTRACTS.md's frozen §6 table list — that file predates this

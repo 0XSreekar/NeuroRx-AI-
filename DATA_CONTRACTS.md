@@ -705,6 +705,32 @@ CONSTRAINT guardrail_blocks_rule_present    CHECK (length(trim(rule_triggered)) 
 
 **Append-only.** Never update or delete a row: this table is the evidence that the safety architecture works, and it is only credible if nothing can quietly edit it after the fact.
 
+### 6.5 `accounts`
+
+**Purpose:** Application sign-in. One account owns exactly one patient record (1:1). Synthetic only — no PHI, ever.
+
+**This is not an access boundary.** The demo patient switcher remains, so a signed-in account can still view any patient's data. See [`docs/superpowers/specs/2026-07-26-neurorx-accounts-auth-design.md`](docs/superpowers/specs/2026-07-26-neurorx-accounts-auth-design.md) §7.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `account_id` | `UUID` | No | **PK.** `DEFAULT gen_random_uuid()`. |
+| `email` | `TEXT` | No | Login identifier. Stored already normalized (lowercased, trimmed) — enforced by CHECK, not only in Python. |
+| `display_name` | `TEXT` | No | The person's name, collected at signup and shown in the app. Never used to sign in; may repeat across accounts. |
+| `password_hash` | `TEXT` | No | argon2id encoded string (~97 chars), including its own parameters. Never the plaintext. |
+| `patient_id` | `UUID` | No | **FK** → `patients.patient_id`, `ON DELETE CASCADE`. `UNIQUE` — the 1:1 model. |
+| `created_at` | `TIMESTAMPTZ` | No | `DEFAULT now()`. |
+| `last_login_at` | `TIMESTAMPTZ` | Yes | `NULL` until the first successful sign-in. |
+
+```sql
+CONSTRAINT accounts_email_unique     UNIQUE (email),
+CONSTRAINT accounts_patient_unique   UNIQUE (patient_id),
+CONSTRAINT accounts_email_normalized CHECK (email = lower(btrim(email))),
+CONSTRAINT accounts_email_shape      CHECK (position('@' in email) > 1),
+CONSTRAINT accounts_name_present     CHECK (length(trim(display_name)) > 0)
+```
+
+`accounts_email_normalized` exists because lowercasing only in Python means one forgotten call creates `Bob@x.com` alongside `bob@x.com`, and `UNIQUE (email)` never notices. `accounts_email_shape` is a sanity check, not email validation.
+
 ---
 
 ## 7. Invariants
