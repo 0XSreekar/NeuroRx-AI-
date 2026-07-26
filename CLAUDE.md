@@ -80,6 +80,60 @@ citation. One task written so far:
 - **Task 3.7**: Reminders job + notifications table — `app/jobs/reminders_job.py`; the real schema superseded Task 3.5's provisional guess, updated `app/db.py` to match rather than leaving the two disagreeing
 - **Task 3.8**: Load synthetic cohort into Lakebase — `lakebase/07_load_cohort.py`; reads Phase 1 cohort from Delta, loads into Lakebase via batch psycopg inserts with deterministic UUID mapping and idempotency (ON CONFLICT DO NOTHING)
 
+### Accounts and sign-in — home page, signup, login
+
+`app/auth.py` (the identity seam) + `app/views/{home,signup,login}.py` + an
+`accounts` table (`DATA_CONTRACTS.md` §6.5). `app/app.py` is now a router:
+`st.navigation(position="hidden")` registering a different page set per auth
+state, so while signed out the app page is not registered and there is nothing
+for that URL to route to — a structural gate, not a return-early check.
+Confirmed in a browser: navigating to `/app` signed out redirects to `/`.
+
+**This is deliberately NOT an access boundary.** The demo patient switcher is
+kept by choice, so any signed-in account can still view any patient's data —
+demonstrated live during verification (signed in as a new account, the switcher
+showed Margaret's full cohort). Said plainly in `auth.py`'s docstring so the
+login screen is never mistaken for protection.
+
+**argon2id via `argon2-cffi==25.1.0`**, verified to actually run on this
+project's Python 3.14 before being pinned: the top-level package ships only a
+pure-Python wheel and alone looks like a 3.14 incompatibility — the C extension
+lives in `argon2-cffi-bindings`, which does publish cp314 wheels.
+
+**Email normalization is a CHECK constraint**, not only a Python call. One
+forgotten `lower()` would create `Bob@x.com` beside `bob@x.com` and
+`UNIQUE (email)` would never notice.
+
+**`authenticate()` returns the same `None`** for unknown-email and
+wrong-password, and the login screen shows one generic message — asserted by a
+test comparing both cases character for character, so the form cannot be used
+to discover which emails have accounts.
+
+**First real test infrastructure in this project**: `pytest==9.1.1`, 56 tests.
+
+> ⚠️ **The test fixture had a real bug, found by running the suite twice.**
+> `pg_conn` called `conn.rollback()` at teardown, but `create_account_with_patient`
+> opens its own `conn.transaction()` and **psycopg COMMITS when the outermost
+> block exits successfully** — so the rollback discarded nothing, and the second
+> run failed on duplicate emails the first had left behind. The first run passed
+> only because the database happened to be empty. Fixed by wrapping each test in
+> an outer transaction block (demoting db's block to a savepoint) and discarding
+> it with `psycopg.Rollback`. **Lesson: a passing test suite is not evidence of
+> isolation — run it twice.**
+
+> ⚠️ **A router bug that unit tests could not catch.** The first `_go()` set
+> `st.session_state["_nav"]` and reran — but nothing read that key, and
+> `st.navigation` routes by URL, so every navigation button silently did nothing.
+> All 56 tests passed regardless. Found by clicking "Create account" in a real
+> browser. Navigation within a page set now uses `st.switch_page(page_object)`;
+> crossing auth states uses `st.rerun()` instead, because the destination page
+> belongs to the other page set and does not exist yet at that moment.
+
+**Known gaps, documented not hidden**: refreshing the browser signs you out
+(`st.session_state` is per-session; Streamlit has no cookie-write API); a new
+account starts empty (no fabricated medication data is seeded); no password
+reset; no login rate limiting.
+
 ### Task 3.8: Load synthetic cohort into Lakebase — idempotent batch load with Margaret Demo verification
 
 `lakebase/07_load_cohort.py` — loads the Phase 1 synthetic cohort from

@@ -77,3 +77,32 @@ NEURORX_LOCAL_PG="$LOCAL_PG" streamlit run app/app.py
 Open the Today tab. You should see Margaret's 5 doses for today, grouped by
 day-part, with a next-dose countdown and working "Taken ✓ / Skip" buttons that
 write back to Postgres.
+
+## 5. Accounts
+
+The app now opens on a public home page. Create an account (name, email,
+password) and you are signed in and dropped into the three tabs.
+
+**A new account starts empty** — signup creates a patient with no schedules, so
+Today and Dashboard show their empty states. That is correct: no fabricated
+medication data is seeded. To see the populated demo cohort, open the patient
+switcher in the header and paste Margaret's ID:
+
+    12345678-1234-1234-1234-123456789012
+
+**The switcher is not access control.** Any signed-in account can view any
+patient. Signing in identifies you; it does not restrict what you can read.
+
+**Refreshing the browser signs you out** — session state is per-session and
+Streamlit has no cookie-write API.
+
+## Running the tests
+
+```bash
+NEURORX_LOCAL_PG="host=/tmp/nrx_pg port=5439 user=postgres dbname=databricks_postgres" \
+  python -m pytest tests/ -v
+```
+
+Tests skip rather than fail when `NEURORX_LOCAL_PG` is unset. The `pg_conn`
+fixture wraps each test in a transaction it rolls back, so the suite leaves no
+rows behind — verified by running it twice back to back.

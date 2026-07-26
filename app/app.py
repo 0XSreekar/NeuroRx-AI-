@@ -71,9 +71,29 @@ theme.inject()
 MARGARET_DEMO_PATIENT_ID = "12345678-1234-1234-1234-123456789012"
 
 
-def _go(url_path: str):
-    """Navigate to a page by url_path, then rerun."""
-    st.session_state["_nav"] = url_path
+# Page objects, populated below before st.navigation(...).run(). Callbacks fire
+# during run(), by which point this is filled in.
+_PAGES: dict[str, "st.navigation"] = {}
+
+
+def _go(name: str):
+    """Move between pages within the CURRENT page set.
+
+    st.navigation routes by URL, so switching pages needs st.switch_page with
+    the actual page object — an earlier version set a session_state key that
+    nothing read, which silently did nothing but rerun the same page. Found by
+    clicking the button, not by reading the code.
+    """
+    st.switch_page(_PAGES[name])
+
+
+def _auth_state_changed():
+    """Rerun after signing in or out, so the page SET is rebuilt.
+
+    Deliberately not st.switch_page: the destination belongs to the other page
+    set and does not exist yet at this point. Re-running the script re-evaluates
+    which pages are registered and lands on that set's default.
+    """
     st.rerun()
 
 
@@ -86,14 +106,14 @@ def _render_home() -> None:
 
 def _render_signup() -> None:
     signup_view.render(
-        on_success=lambda: _go("app"),
+        on_success=_auth_state_changed,
         on_login=lambda: _go("login"),
     )
 
 
 def _render_login() -> None:
     login_view.render(
-        on_success=lambda: _go("app"),
+        on_success=_auth_state_changed,
         on_signup=lambda: _go("signup"),
     )
 
@@ -123,7 +143,7 @@ def _render_app_page() -> None:
                 theme.eyebrow(f"SIGNED IN AS {account.display_name.upper()}"),
                 unsafe_allow_html=True,
             )
-            st.session_state.patient_id = st.text_input(
+            entered = st.text_input(
                 "Patient ID",
                 value=st.session_state.patient_id,
                 help=(
@@ -133,11 +153,21 @@ def _render_app_page() -> None:
             )
             st.caption("💊 All data is synthetic and for demo only.")
 
+    # Rerun on a change so the popover's own label (rendered above, from the
+    # pre-edit value) cannot disagree with the patient the tabs are showing.
+    # Without this the header reads one patient while the body shows another
+    # until some unrelated interaction happens to rerun the script.
+    if entered != st.session_state.patient_id:
+        st.session_state.patient_id = entered
+        st.rerun()
+
     with col_out:
         if st.button("Sign out", use_container_width=True):
             auth.sign_out()
+            # Drop the switcher's patient so the next account does not inherit
+            # whichever patient this session was last looking at.
             st.session_state.pop("patient_id", None)
-            _go("home")
+            _auth_state_changed()
 
     # Persistent safety notice — every tab, no dismiss control (Task 3.4
     # Requirement 1). Rendered before the tab widget, so it sits above all
@@ -164,12 +194,16 @@ def _render_app_page() -> None:
 # restyled pill tabs as the only navigation.
 # ---------------------------------------------------------------------------
 if auth.current_account() is None:
-    pages = [
-        st.Page(_render_home, title="Home", url_path="home", default=True),
-        st.Page(_render_login, title="Sign in", url_path="login"),
-        st.Page(_render_signup, title="Create account", url_path="signup"),
-    ]
+    _PAGES["home"] = st.Page(_render_home, title="Home", url_path="home", default=True)
+    _PAGES["login"] = st.Page(_render_login, title="Sign in", url_path="login")
+    _PAGES["signup"] = st.Page(
+        _render_signup, title="Create account", url_path="signup"
+    )
+    pages = [_PAGES["home"], _PAGES["login"], _PAGES["signup"]]
 else:
-    pages = [st.Page(_render_app_page, title="NeuroRx AI", url_path="app", default=True)]
+    _PAGES["app"] = st.Page(
+        _render_app_page, title="NeuroRx AI", url_path="app", default=True
+    )
+    pages = [_PAGES["app"]]
 
 st.navigation(pages, position="hidden").run()
