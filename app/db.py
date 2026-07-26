@@ -66,6 +66,7 @@ of scope").
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -102,8 +103,6 @@ def _conninfo() -> str:
     Extracted from _get_pool() so non-Streamlit callers (tests, jobs) can
     build the same connection without going through @st.cache_resource.
     """
-    import os
-
     local = os.getenv("NEURORX_LOCAL_PG")
     if local:
         return local
@@ -866,3 +865,115 @@ def refill_estimates(patient_id: str) -> list[dict]:
         }
         for s in schedules
     ]
+
+
+# ---------------------------------------------------------------------------
+# Accounts (DATA_CONTRACTS.md §6.5)
+#
+# Sign-in identity. NOT an access boundary — the demo patient switcher stays,
+# so a signed-in account can still read any patient. See app/auth.py.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_email(email: str) -> str:
+    """Lowercase and trim. The accounts_email_normalized CHECK enforces this
+    database-side too — this is the convenience, not the guarantee."""
+    return email.strip().lower()
+
+
+@contextmanager
+def _conn_or_pooled(conn):
+    """Yield the caller's connection, or borrow one from the pool.
+
+    Tests pass an explicit connection so their writes stay inside a single
+    rolled-back transaction. The app passes nothing: db's pool is
+    @st.cache_resource-decorated and would otherwise open a second connection
+    that cannot see uncommitted rows.
+    """
+    if conn is not None:
+        yield conn
+    else:
+        with _get_pool().connection() as pooled:
+            yield pooled
+
+
+def create_account_with_patient(
+    email: str, display_name: str, password_hash: str, conn=None
+) -> dict:
+    """Create the patient row and its account in ONE transaction.
+
+    Both inserts share a transaction so a duplicate-email failure cannot leave
+    an orphan patient behind. Raises psycopg.errors.UniqueViolation when the
+    email already exists; the caller decides how to phrase that.
+    """
+    normalized = _normalize_email(email)
+    with _conn_or_pooled(conn) as active:
+        with active.transaction():
+            with active.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO patients (display_name)
+                    VALUES (%(name)s)
+                    RETURNING patient_id
+                    """,
+                    {"name": display_name},
+                )
+                patient_id = cur.fetchone()["patient_id"]
+
+                cur.execute(
+                    """
+                    INSERT INTO accounts (email, display_name, password_hash, patient_id)
+                    VALUES (%(email)s, %(name)s, %(hash)s, %(patient_id)s)
+                    RETURNING account_id, email, display_name, patient_id
+                    """,
+                    {
+                        "email": normalized,
+                        "name": display_name,
+                        "hash": password_hash,
+                        "patient_id": patient_id,
+                    },
+                )
+                row = cur.fetchone()
+
+    return {
+        "account_id": str(row["account_id"]),
+        "email": row["email"],
+        "display_name": row["display_name"],
+        "patient_id": str(row["patient_id"]),
+    }
+
+
+def find_account_by_email(email: str, conn=None) -> Optional[dict]:
+    """The account for this email, or None. Includes password_hash — the only
+    function that returns it, and only auth.authenticate() should call it."""
+    with _conn_or_pooled(conn) as active:
+        with active.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                SELECT account_id, email, display_name, patient_id, password_hash
+                FROM accounts
+                WHERE email = %(email)s
+                """,
+                {"email": _normalize_email(email)},
+            )
+            row = cur.fetchone()
+
+    if row is None:
+        return None
+    return {
+        "account_id": str(row["account_id"]),
+        "email": row["email"],
+        "display_name": row["display_name"],
+        "patient_id": str(row["patient_id"]),
+        "password_hash": row["password_hash"],
+    }
+
+
+def touch_last_login(account_id: str, conn=None) -> None:
+    """Record a successful sign-in."""
+    with _conn_or_pooled(conn) as active:
+        with active.cursor() as cur:
+            cur.execute(
+                "UPDATE accounts SET last_login_at = now() WHERE account_id = %(a)s",
+                {"a": account_id},
+            )
