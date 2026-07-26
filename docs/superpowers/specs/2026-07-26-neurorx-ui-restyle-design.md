@@ -161,12 +161,17 @@ The mockup's Today surface maps almost 1:1 onto what this view already renders.
    visual weight drops. Recorded here rather than silently resolved, per
    `CLAUDE.md` §6. If a judge-facing review wants the louder treatment back, that
    is a one-line change in `app/app.py`.
-2. **Google Fonts is a runtime network dependency.** The `theme.font` URL form
-   fetches from `fonts.googleapis.com` at page load. Fine locally; a deployed
-   Databricks App may block it. Fallback: self-host via
-   `server.enableStaticServing = true` plus `[[theme.fontFaces]]` tables. The woff2
-   files are already embedded in `design/mockup.html` and can be extracted. Start
-   with the URL form; fall back only if the deployed app shows fallback fonts.
+2. ~~**Google Fonts is a runtime network dependency.**~~ **RESOLVED — fonts are
+   self-hosted.** The URL form was skipped entirely rather than deferred: it makes
+   first paint depend on an outbound call to `fonts.googleapis.com` that a deployed
+   Databricks App may block, and the failure is silent (every surface quietly falls
+   back to system fonts). The 8 latin/latin-ext woff2 files were extracted from
+   `design/mockup.html`'s own embedded bundle into `app/static/fonts/` — 127 KB
+   total, each verified to carry the `wOF2` magic number — and declared as 18
+   `[[theme.fontFaces]]` tables with `server.enableStaticServing = true`. Verified
+   served: `GET /app/static/fonts/Manrope-latin.woff2` → `200 font/woff2 24576`.
+   Manrope and JetBrains Mono are variable fonts, so several tables share a URL and
+   differ only by `weight` — mirroring the mockup's own `@font-face` CSS.
 3. **Streamlit internal selectors are version-fragile.** CSS targeting
    `[data-testid="stButton"]` and similar depends on Streamlit's internal DOM,
    which is not a stable API. Mitigation: push as much as possible into
@@ -192,6 +197,41 @@ read:
 - Confirm the safety ticker is present on all three tabs and has no dismiss control.
 - Chat tab degrades to its existing clear notice locally (no agent endpoint) —
   the restyle must not turn that into a traceback.
+
+## 8a. Found during implementation
+
+Recorded because each cost real time to find and would cost it again.
+
+1. **Config must live at `app/.streamlit/`, not the repo root.** Streamlit reads
+   config from `~/.streamlit/`, `${CWD}/.streamlit/`, and
+   `<main script dir>/.streamlit/` (last wins). This project launches two ways —
+   `streamlit run app/app.py` from the repo root locally, and `app.yaml`'s
+   `streamlit run app.py` from inside `app/` when deployed. Only the script-level
+   location resolves identically for both. A repo-root `.streamlit/` would have
+   themed local dev and silently left the deployed app unstyled. Same class of bug
+   as the `sys.path` bootstrap already documented in `app/app.py`.
+2. **Streamlit 1.59 renders tabs with react-aria, not BaseWeb.** The
+   `[data-baseweb="tab-list"]` / `[data-baseweb="tab"]` selectors used by nearly
+   every Streamlit-CSS recipe online match **nothing** — confirmed by dumping the
+   live DOM. The current shape is
+   `[role="tablist"] > [data-testid="stTab"][aria-selected] > .react-aria-SelectionIndicator`.
+3. **Streamlit caches imported modules in `sys.modules`.** With no `watchdog`
+   installed, edits to `app/theme.py` do not take effect on a browser refresh —
+   the server must be restarted. Cost one round of "the CSS isn't applying" before
+   a DOM check showed the *old* stylesheet was still being served.
+4. **`st.columns` cannot give paired cards equal heights.** Streamlit wraps each
+   column child in fixed-height wrappers, so a card's own `height: 100%` has
+   nothing to resolve against. Cards paired on a row are rendered as a single flex
+   row (`theme.card_row`) instead. Only valid for cards with no widgets — anything
+   containing an `st.button` must use real columns.
+5. **Pre-existing bug found while verifying the Chat tab, fixed here.** On the
+   local path the "chat needs the workspace" notice was painted into an
+   `st.empty()` placeholder and returned `text=""`. `render()` then calls
+   `st.rerun()`, which repaints the tab from history — destroying the placeholder
+   and leaving an **empty assistant bubble** that reads as a hung request. The
+   notice is now returned as the assistant turn's own text so it survives the
+   repaint. Unrelated to the restyle (the block is unchanged from `HEAD`), but it
+   is on the surface this work had to verify.
 
 ## 9. Out of scope
 

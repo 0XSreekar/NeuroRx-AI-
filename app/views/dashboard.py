@@ -280,8 +280,11 @@ def _render_adherence_by_drug(stats: dict) -> None:
         )
     )
     theme.style_plotly(fig, height=max(240, 54 * len(by_drug_sorted)))
-    fig.update_layout(margin=dict(l=10, r=48, t=8, b=24))
-    fig.update_xaxes(range=[0, 108], title="")
+    # Headroom for the outside-positioned "100%" labels. With the axis capped at
+    # the data max the label for a 100% bar renders past the plot edge and gets
+    # clipped to "100" — caught on screen, not in the code.
+    fig.update_layout(margin=dict(l=10, r=64, t=8, b=24))
+    fig.update_xaxes(range=[0, 122], title="", showticklabels=False)
     fig.update_yaxes(title="")
     st.plotly_chart(fig, use_container_width=True)
     st.markdown(

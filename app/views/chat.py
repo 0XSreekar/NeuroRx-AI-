@@ -43,6 +43,16 @@ import streamlit as st
 
 from app import agent_client, theme
 
+# Shown in place of an answer when no agent endpoint is reachable (the local
+# demo path). Stored in chat history as the assistant turn's own text so it
+# survives the st.rerun() that repaints the tab — see the raise site below.
+_ENDPOINT_UNAVAILABLE_NOTICE = (
+    "**Chat needs the Databricks workspace.** The assistant runs on the deployed "
+    "`neurorx-agent` serving endpoint, which isn't available on the local demo "
+    "path. The Today tab works fully against local data; connect a workspace to "
+    "enable chat."
+)
+
 
 def render(patient_id: str) -> None:
     """Entry point called by app/app.py inside the Chat tab."""
@@ -155,13 +165,19 @@ def _render_streaming_response(patient_id: str, history: list[dict]) -> dict | N
             # non-alarming message and return a well-formed result so NO spinner
             # fallback fires (chat() would hit the same wall and hang) and history
             # stays consistent. Parity with the Dashboard's graceful degradation.
-            placeholder.info(
-                "💬 **Chat needs the Databricks workspace.** The assistant runs on "
-                "the deployed `neurorx-agent` serving endpoint, which isn't "
-                "available on the local demo path. The Today tab works fully "
-                "against local data; connect a workspace to enable chat."
-            )
-            return {"text": "", "citations": [], "pending_confirmation": None}
+            #
+            # The notice is returned as `text`, not just painted into the
+            # placeholder: _send_message() appends this result to chat history and
+            # render() then calls st.rerun(), which repaints the whole tab from
+            # history. A placeholder-only message is destroyed by that repaint,
+            # leaving an empty assistant bubble that reads as a hung request.
+            # Found by actually sending a message on the local path.
+            placeholder.markdown(_ENDPOINT_UNAVAILABLE_NOTICE)
+            return {
+                "text": _ENDPOINT_UNAVAILABLE_NOTICE,
+                "citations": [],
+                "pending_confirmation": None,
+            }
         except NotImplementedError:
             # Confirmed real signal (see agent_client.chat_stream()'s
             # docstring): the deployment client doesn't support streaming at
@@ -353,7 +369,7 @@ def _render_change_diff(proposed: dict) -> bool:
 
 
 def _render_prescription_upload(patient_id: str) -> None:
-    with st.expander("📷 Add a Prescription (Photo or Text)", expanded=False):
+    with st.expander("Add a prescription (photo or text)", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             uploaded_file = st.file_uploader("Prescription Photo", type=["png", "jpg", "jpeg"], help="JPG, PNG, up to 200MB")
@@ -363,7 +379,7 @@ def _render_prescription_upload(patient_id: str) -> None:
 
         pasted_text = st.text_area("Prescription Text", placeholder="Paste the prescription text here...", height=100)
 
-        if st.button("📄 Extract Prescription", key="extract_button", type="primary", use_container_width=True):
+        if st.button("Extract prescription", key="extract_button", type="primary", use_container_width=True):
             if uploaded_file is not None:
                 image_or_text = uploaded_file.read()
             elif pasted_text.strip():
@@ -392,7 +408,11 @@ def _render_extraction_confirmation_card(patient_id: str) -> None:
     drugs = extraction["drugs"]
 
     with st.container(border=True):
-        st.markdown("### 📋 Confirm Prescription Drugs")
+        st.markdown(
+            theme.eyebrow("CONFIRM BEFORE SAVING — YOU CONFIRM, NOT THE MODEL"),
+            unsafe_allow_html=True,
+        )
+        st.markdown("### Confirm prescription drugs")
         st.caption(f"{len(drugs)} drug{'s' if len(drugs) != 1 else ''} found — please review:")
 
         table_rows = [
@@ -421,14 +441,14 @@ def _render_extraction_confirmation_card(patient_id: str) -> None:
 
         col_confirm, col_edit, col_cancel = st.columns(3)
         with col_confirm:
-            if st.button("✓ Confirm & Add", key="confirm_extraction", type="primary", use_container_width=True):
+            if st.button("Confirm & add", key="confirm_extraction", type="primary", use_container_width=True):
                 _submit_extraction(patient_id, drugs, edited)
         with col_edit:
-            if st.button("✏️ Edit", key="edit_extraction", use_container_width=True):
+            if st.button("Edit", key="edit_extraction", use_container_width=True):
                 st.session_state.extraction_editing = not st.session_state.extraction_editing
                 st.rerun()
         with col_cancel:
-            if st.button("✕ Cancel", key="cancel_extraction", use_container_width=True):
+            if st.button("Cancel", key="cancel_extraction", use_container_width=True):
                 st.session_state.pending_extraction = None
                 st.session_state.extraction_editing = False
                 st.rerun()
