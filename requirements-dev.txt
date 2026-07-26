@@ -55,3 +55,7 @@ duckdb
 # in pipelines/medallion_pipeline.py. Requires Java 17+, which CLAUDE.md §4
 # notes is not available on this machine.
 pyspark
+
+# --- Testing ---
+# Version resolved live against the PyPI JSON API, per CLAUDE.md §6.
+pytest==9.1.1

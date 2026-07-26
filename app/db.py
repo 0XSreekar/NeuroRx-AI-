@@ -89,6 +89,33 @@ _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 5
 
 
+def _conninfo() -> str:
+    """The libpq conninfo string for Lakebase, or the local Postgres standing
+    in for it.
+
+    NEURORX_LOCAL_PG is used verbatim — it is a complete conninfo string for
+    the off-workspace demo path (docs/local_dev.md), typically a Unix socket
+    with no TLS. Appending to it would break that. Same switch the cohort
+    loader (lakebase/07_load_cohort.py) honors, so both point at the same
+    store from one env var.
+
+    Extracted from _get_pool() so non-Streamlit callers (tests, jobs) can
+    build the same connection without going through @st.cache_resource.
+    """
+    import os
+
+    local = os.getenv("NEURORX_LOCAL_PG")
+    if local:
+        return local
+    return (
+        f"host={settings.lakebase_host} "
+        f"dbname={settings.lakebase_db} "
+        f"user={settings.lakebase_user} "
+        f"password={settings.lakebase_password} "
+        f"sslmode=require port=5432"
+    )
+
+
 @st.cache_resource
 def _get_pool() -> ConnectionPool:
     """One pool per Streamlit process, memoized via st.cache_resource so a
@@ -96,24 +123,8 @@ def _get_pool() -> ConnectionPool:
     re-executes on every interaction) reuses the same pool instead of
     leaking a new one on every rerun.
     """
-    # NEURORX_LOCAL_PG lets local dev point the app at a plain local Postgres
-    # standing in for Lakebase (the off-workspace demo path) — a full libpq
-    # conninfo string, used verbatim, with no forced TLS. Unset in every real
-    # deployment, where the Lakebase credentials below apply. Same switch the
-    # cohort loader (lakebase/07_load_cohort.py) honors, so both point at the
-    # same store from one env var.
-    import os
-
-    local = os.getenv("NEURORX_LOCAL_PG")
-    conninfo = local or (
-        f"host={settings.lakebase_host} "
-        f"dbname={settings.lakebase_db} "
-        f"user={settings.lakebase_user} "
-        f"password={settings.lakebase_password} "
-        f"sslmode=require port=5432"
-    )
     return ConnectionPool(
-        conninfo,
+        _conninfo(),
         min_size=_POOL_MIN_SIZE,
         max_size=_POOL_MAX_SIZE,
         open=True,
