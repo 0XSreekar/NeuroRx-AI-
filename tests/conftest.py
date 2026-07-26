@@ -42,11 +42,22 @@ def pg_schema() -> str:
 def pg_conn(pg_schema):
     """A connection whose work is rolled back after each test.
 
-    Every test gets a clean database without re-applying the schema: the
-    transaction is never committed, so inserts vanish on rollback. This is why
-    tests must not open their own second connection to observe their writes —
-    an uncommitted transaction is invisible outside it.
+    The test runs inside an explicit OUTER transaction block, which is
+    load-bearing: `db.create_account_with_patient` opens its own
+    `conn.transaction()`, and psycopg COMMITS when the outermost block exits
+    successfully. A plain `conn.rollback()` at teardown therefore rolls back
+    nothing — the data is already committed. Wrapping the test in an outer
+    block demotes db's own block to a savepoint, so nothing can commit and
+    `psycopg.Rollback` discards it all.
+
+    Found the hard way: without this, account tests committed their rows and
+    the second run failed on duplicate emails left by the first.
+
+    Tests must not open a second connection to observe their writes — an
+    uncommitted transaction is invisible outside it.
     """
     with psycopg.connect(pg_schema) as conn:
-        yield conn
-        conn.rollback()
+        with conn.transaction() as tx:
+            yield conn
+            # Swallowed by this same block; discards everything the test did.
+            raise psycopg.Rollback(tx)

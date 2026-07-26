@@ -22,8 +22,15 @@ here returns a DB row, a hash, or a Streamlit object.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Optional
+
+import psycopg
+import streamlit as st
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+
+from app import db
 
 # argon2id at the library's defaults: m=64MiB, t=3, p=4. These are OWASP's
 # recommended parameters and measured ~33 ms on this project's Python 3.14.
@@ -61,3 +68,90 @@ def verify_password(hash_: str, plaintext: str) -> bool:
         return _hasher.verify(hash_, plaintext)
     except (VerifyMismatchError, VerificationError, InvalidHashError):
         return False
+
+
+# ---------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------
+
+SESSION_KEY = "account"
+
+
+@dataclass(frozen=True)
+class Account:
+    """The signed-in identity, as views see it.
+
+    Deliberately does NOT carry password_hash: this object is placed in
+    st.session_state, and a hash has no business being there.
+    """
+
+    account_id: str
+    email: str
+    display_name: str
+    patient_id: str
+
+
+class EmailTaken(Exception):
+    """Raised when an email already has an account."""
+
+
+def create_account(email: str, display_name: str, password: str) -> Account:
+    """Create an account and its patient record.
+
+    Raises WeakPassword before touching the database, and EmailTaken (rather
+    than leaking psycopg's UniqueViolation) so views handle one vocabulary.
+    """
+    password_hash = hash_password(password)
+    try:
+        row = db.create_account_with_patient(email, display_name, password_hash)
+    except psycopg.errors.UniqueViolation as exc:
+        raise EmailTaken(
+            f"An account already exists for {email.strip().lower()}."
+        ) from exc
+    return Account(
+        account_id=row["account_id"],
+        email=row["email"],
+        display_name=row["display_name"],
+        patient_id=row["patient_id"],
+    )
+
+
+def authenticate(email: str, password: str) -> Optional[Account]:
+    """The Account for these credentials, or None.
+
+    Returns the SAME None for an unknown email and for a wrong password, so
+    the sign-in form cannot be used to discover which emails have accounts.
+    Do not split this into distinct errors for a friendlier message.
+    """
+    row = db.find_account_by_email(email)
+    if row is None:
+        return None
+    if not verify_password(row["password_hash"], password):
+        return None
+
+    db.touch_last_login(row["account_id"])
+    return Account(
+        account_id=row["account_id"],
+        email=row["email"],
+        display_name=row["display_name"],
+        patient_id=row["patient_id"],
+    )
+
+
+def sign_in(account: Account) -> None:
+    st.session_state[SESSION_KEY] = account
+
+
+def sign_out() -> None:
+    st.session_state.pop(SESSION_KEY, None)
+
+
+def current_account() -> Optional[Account]:
+    """The signed-in Account, or None.
+
+    Backed by st.session_state, which is per-session: refreshing the browser
+    signs the user out. Streamlit exposes no first-party cookie-WRITE API
+    (st.context.cookies is read-only), so this is accepted for the demo and
+    is one of the things swapping in OIDC would fix.
+    """
+    return st.session_state.get(SESSION_KEY)
