@@ -45,5 +45,13 @@ databricks-sql-connector==4.3.0
 # app and the served agent agree on the client/server wire format.
 mlflow==3.14.0
 
+# --- Auth ---
+# argon2id, OWASP's first-choice password hash. Version resolved live against
+# the PyPI JSON API. NOTE: the top-level package ships only a pure-Python
+# wheel; the C extension lives in argon2-cffi-bindings, which does publish
+# cp314 wheels — confirmed before pinning, since the parent package alone
+# looks like a Python 3.14 incompatibility.
+argon2-cffi==25.1.0
+
 # --- Config ---
 python-dotenv==1.2.2
