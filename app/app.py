@@ -49,26 +49,21 @@ sys.path.insert(0, _REPO_ROOT)
 
 import streamlit as st
 
+from app import theme
 from app.views import chat as chat_view
 from app.views import dashboard as dashboard_view
 from app.views import today as today_view
 
-st.set_page_config(page_title="NeuroRx AI", page_icon="💊", layout="wide")
-
-# ---------------------------------------------------------------------------
-# Persistent safety banner — every tab, non-dismissable (Task 3.4 Requirement 1)
-#
-# Rendered before the tab widget itself, so it is the first thing on every
-# tab and cannot be scrolled past or closed — there is deliberately no
-# close/dismiss control anywhere in this block. This is UI-level
-# reinforcement of `agent/prompts/system_prompt.md`'s own Identity section
-# ("You are an organizational assistant... not a medical professional") —
-# belt-and-suspenders with the prompt, not a substitute for it.
-# ---------------------------------------------------------------------------
-st.warning(
-    "⚠️ **NeuroRx AI is an organizational assistant, not medical advice.**  \n"
-    "For medical questions, contact your pharmacist or doctor. **Emergencies: call 911.**",
+st.set_page_config(
+    page_title="NeuroRx AI",
+    page_icon="💊",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
+
+# The design layer (`design/mockup.html`). Must run before any view renders, so
+# nothing paints unstyled on first frame.
+theme.inject()
 
 # ---------------------------------------------------------------------------
 # Patient selector — shared session state across all three tabs
@@ -84,19 +79,45 @@ MARGARET_DEMO_PATIENT_ID = "12345678-1234-1234-1234-123456789012"
 if "patient_id" not in st.session_state:
     st.session_state.patient_id = MARGARET_DEMO_PATIENT_ID
 
-with st.sidebar:
-    st.markdown("### 👤 Patient")
-    st.session_state.patient_id = st.text_input(
-        "Patient ID",
-        value=st.session_state.patient_id,
-        help=f"Defaults to Margaret Demo ({MARGARET_DEMO_PATIENT_ID[:8]}...), the project's canonical demo patient.",
-    )
-    st.caption("💊 All data is synthetic and for demo only.")
+# ---------------------------------------------------------------------------
+# Header: wordmark left, patient control right.
+#
+# The mockup shows the patient as a static pill. The app still needs a way to
+# actually change patients, so the pill is an `st.popover` — the closest real
+# widget to "a pill you click to reveal a control" — with the text input inside
+# it. The sidebar it replaces is hidden in theme.py.
+# ---------------------------------------------------------------------------
+col_brand, col_patient = st.columns([4, 1], vertical_alignment="center")
+
+with col_brand:
+    st.markdown(theme.brand(), unsafe_allow_html=True)
+
+with col_patient:
+    with st.popover(
+        f"PATIENT  {st.session_state.patient_id[:8] or '—'}",
+        use_container_width=True,
+    ):
+        st.session_state.patient_id = st.text_input(
+            "Patient ID",
+            value=st.session_state.patient_id,
+            help=(
+                f"Defaults to Margaret Demo ({MARGARET_DEMO_PATIENT_ID[:8]}...), "
+                "the project's canonical demo patient."
+            ),
+        )
+        st.caption("💊 All data is synthetic and for demo only.")
+
+# Persistent safety notice — every tab, no dismiss control (Task 3.4
+# Requirement 1). Rendered before the tab widget, so it sits above all three
+# tabs rather than inside any one of them. UI-level reinforcement of
+# `agent/prompts/system_prompt.md`'s Identity section — belt-and-suspenders
+# with the prompt, not a substitute for it.
+theme.safety_ticker()
 
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_chat, tab_today, tab_dashboard = st.tabs(["💬 Chat", "✅ Today", "📊 Dashboard"])
+tab_chat, tab_today, tab_dashboard = st.tabs(["Chat", "Today", "Dashboard"])
 
 with tab_chat:
     chat_view.render(patient_id=st.session_state.patient_id)

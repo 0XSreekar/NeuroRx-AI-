@@ -37,9 +37,11 @@ card with real Confirm/Cancel buttons; nothing here ever sets
 only on an actual button click in this session.
 """
 
+import html
+
 import streamlit as st
 
-from app import agent_client
+from app import agent_client, theme
 
 
 def render(patient_id: str) -> None:
@@ -47,10 +49,15 @@ def render(patient_id: str) -> None:
     _init_session_state()
 
     if not patient_id:
-        st.info("📋 No patient selected. Choose a patient ID in the sidebar to chat.")
+        st.info("No patient selected. Choose a patient ID in the header to chat.")
         return
 
-    st.caption(f"💬 Chatting as patient `{patient_id[:8]}...`")
+    st.markdown(
+        theme.section_heading(
+            f"CHATTING AS PATIENT {patient_id[:8]}", "Ask about your medications"
+        ),
+        unsafe_allow_html=True,
+    )
 
     _render_prescription_upload(patient_id)
     _render_pending_confirmation_card_if_any(patient_id)
@@ -210,15 +217,23 @@ def _render_citation_chips(resolved_citations: list[dict]) -> None:
     if not resolved_citations:
         return
 
-    st.markdown("**📚 Sources:**")
+    st.markdown(theme.eyebrow("SOURCES"), unsafe_allow_html=True)
     cols = st.columns(min(3, len(resolved_citations)))
     for idx, citation in enumerate(resolved_citations):
-        section_label = citation.get('section', 'info').replace('_', ' ').title()
+        section_label = citation.get("section", "info").replace("_", " ").title()
         with cols[idx % len(cols)]:
-            with st.expander(f"📄 {citation.get('drug_name', '?')} — {section_label}"):
+            with st.expander(f"{citation.get('drug_name', '?')} — {section_label}"):
+                st.markdown(
+                    theme.eyebrow(f"FDA LABEL · {section_label.upper()}"),
+                    unsafe_allow_html=True,
+                )
                 st.markdown(f"> {citation.get('chunk_text', '(text unavailable)')}")
-                st.caption(f"Set ID: `{citation.get('set_id', '?')}`")
-                st.caption(f"Chunk: `{citation.get('chunk_id', '?')}`")
+                st.markdown(
+                    theme.eyebrow(
+                        f"SET {citation.get('set_id', '?')} · CHUNK {citation.get('chunk_id', '?')}"
+                    ),
+                    unsafe_allow_html=True,
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -233,25 +248,42 @@ def _render_pending_confirmation_card_if_any(patient_id: str) -> None:
         return
 
     with st.container(border=True):
+        # The mockup's eyebrow states the invariant plainly. It is not decoration:
+        # `manage_schedule` enforces confirmation in code (Task 2.3's two gates),
+        # and this card is the surface where the human actually supplies it.
+        st.markdown(
+            theme.eyebrow("PENDING SCHEDULE CHANGE — YOU CONFIRM, NOT THE MODEL"),
+            unsafe_allow_html=True,
+        )
+
         if pending["status"] == "blocked_pending_confirmation":
-            st.error("🚨 **Drug Interaction Alert** — Action blocked pending your confirmation")
+            st.error("**Drug interaction alert** — action blocked pending your confirmation")
             st.markdown("**Interactions found with your current medications:**")
             for interaction in pending.get("interactions", []):
                 severity = interaction.get("severity", "unknown").upper()
-                severity_icon = "🔴" if severity == "MAJOR" else "🟡" if severity == "MODERATE" else "🔵"
+                tone = "warn" if severity in {"MAJOR", "MODERATE"} else "muted"
                 st.markdown(
-                    f"{severity_icon} **{severity}** — {interaction.get('description', 'No description available.')}"
+                    theme.status_pill(severity, tone)
+                    + f"&nbsp; {interaction.get('description', 'No description available.')}",
+                    unsafe_allow_html=True,
                 )
                 sources = interaction.get("sources", [])
                 if sources:
-                    st.caption(f"Source: {', '.join(sources)}")
+                    st.markdown(
+                        theme.eyebrow(f"SOURCE: {', '.join(sources)}"),
+                        unsafe_allow_html=True,
+                    )
         else:  # needs_confirmation
-            st.warning("📋 **Schedule Change Pending**  \nPlease review and confirm this change:")
-            st.json(pending.get("proposed_change", {}), expanded=True)
+            proposed = pending.get("proposed_change", {}) or {}
+            rendered_diff = _render_change_diff(proposed)
+            if not rendered_diff:
+                # No from/to pair to show — fall back to the raw payload rather
+                # than silently hiding what is about to be written.
+                st.json(proposed, expanded=True)
 
         col_confirm, col_cancel = st.columns(2)
         with col_confirm:
-            if st.button("✓ Confirm", key="confirm_pending", type="primary", use_container_width=True):
+            if st.button("Confirm change", key="confirm_pending", type="primary", use_container_width=True):
                 payload = dict(pending.get("payload") or {})
                 payload["user_confirmed"] = True
                 if pending["status"] == "blocked_pending_confirmation":
@@ -280,9 +312,39 @@ def _render_pending_confirmation_card_if_any(patient_id: str) -> None:
                     st.session_state.pending_confirmation = None
                 st.rerun()
         with col_cancel:
-            if st.button("✕ Cancel", key="cancel_pending", use_container_width=True):
+            if st.button("Keep current", key="cancel_pending", use_container_width=True):
                 st.session_state.pending_confirmation = None
                 st.rerun()
+
+
+def _render_change_diff(proposed: dict) -> bool:
+    """Render the mockup's old -> new diff, if the payload has such a pair.
+
+    Returns True if something was rendered. `manage_schedule`'s proposed_change
+    shape varies by action, so this looks for the field pairs it actually knows
+    how to display and reports failure rather than guessing — the caller then
+    falls back to showing the raw payload, so a change is never confirmed
+    against a card that displayed nothing.
+    """
+    drug = proposed.get("drug_name") or proposed.get("drug")
+    pairs = [
+        ("dose_times_before", "dose_times_after"),
+        ("old_dose_times", "new_dose_times"),
+        ("from", "to"),
+    ]
+    for before_key, after_key in pairs:
+        if before_key in proposed and after_key in proposed:
+            before, after = proposed[before_key], proposed[after_key]
+            fmt = lambda v: ", ".join(map(str, v)) if isinstance(v, (list, tuple)) else str(v)
+            if drug:
+                st.markdown(
+                    f'<div style="font-size:1rem;font-weight:500;margin:.5rem 0 .3rem">'
+                    f"{html.escape(str(drug))}</div>",
+                    unsafe_allow_html=True,
+                )
+            st.markdown(theme.diff(fmt(before), fmt(after)), unsafe_allow_html=True)
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------

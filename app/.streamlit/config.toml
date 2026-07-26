@@ -1,0 +1,233 @@
+# NeuroRx AI — Streamlit theme (design/mockup.html design language)
+#
+# ## Why this file lives at app/.streamlit/, not repo-root .streamlit/
+#
+# Streamlit reads config from three places, later winning over earlier
+# (verified against streamlit 1.59.2's own `config.get_config_files` /
+# `file_util.py`, not assumed):
+#   1. ~/.streamlit/config.toml                      (global)
+#   2. ${CWD}/.streamlit/config.toml                 (project — cwd-dependent!)
+#   3. <main script dir>/.streamlit/config.toml      (script-level — wins)
+#
+# This project launches the app two different ways:
+#   - local dev:  `streamlit run app/app.py`  from the repo root  (cwd = repo root)
+#   - deployed:   app.yaml's `streamlit run app.py`, run from inside app/
+#
+# A repo-root `.streamlit/` would be found only by the first. The script-level
+# location resolves to `app/.streamlit/` for BOTH, so local and deployed cannot
+# silently diverge on theming. Same class of bug — and the same fix — as the
+# sys.path bootstrap in app/app.py.
+#
+# ## Fonts are self-hosted, not fetched from Google
+#
+# `theme.font` also accepts a "Name:https://fonts.googleapis.com/..." URL form,
+# which is simpler but makes first paint depend on a runtime call to
+# fonts.googleapis.com — an outbound request a deployed Databricks App may block,
+# silently degrading every surface to fallback fonts. The woff2 files were instead
+# extracted from design/mockup.html's own embedded bundle into app/static/fonts/
+# (latin + latin-ext subsets only; 127 KB total, all verified to carry the wOF2
+# magic number). Streamlit serves them from <main script dir>/static at the URL
+# path app/static/... — again derived from the script path, so it holds for both
+# launch paths above.
+#
+# Manrope and JetBrains Mono are VARIABLE fonts: one file serves every weight,
+# which is why several [[theme.fontFaces]] tables below share a url and differ
+# only by `weight`. That mirrors exactly what the mockup's own @font-face CSS does.
+
+[server]
+# Required for app/static/fonts/*.woff2 to be reachable. Without this the
+# fontFaces urls 404 and every surface silently falls back to system fonts.
+enableStaticServing = true
+
+[theme]
+base = "dark"
+
+# --- palette -----------------------------------------------------------------
+# Source values are oklch (from the mockup). Converted to hex and verified
+# against the browser's own oklch renderer via a canvas fillStyle round-trip;
+# an independent Python oklch->sRGB implementation produced identical output.
+#
+#   oklch(0.145 0.012 258) -> #070A0F   page background
+#   oklch(0.965 0.004 250) -> #F1F4F6   primary text
+#   oklch(0.84  0.085 195) -> #84DCDC   accent (cyan)
+#   oklch(0.86  0.075 82)  -> #EACD99   warn (amber)
+#
+# The mockup's surfaces/borders are translucent white over that background
+# (e.g. oklch(1 0 0 / 0.03)). Streamlit's theme keys take solid colors, so those
+# are pre-blended against #070A0F rather than passed through as rgba.
+backgroundColor = "#070A0F"
+secondaryBackgroundColor = "#0E1116"   # white 3% over bg — card surface
+textColor = "#F1F4F6"
+primaryColor = "#84DCDC"
+borderColor = "#202327"                # white 10% over bg — hairline
+linkColor = "#84DCDC"
+linkUnderline = false
+
+# Amber is the mockup's caution tone (interaction warnings, "taken late").
+yellowColor = "#EACD99"
+
+# --- shape -------------------------------------------------------------------
+# The mockup uses 999px pills for essentially every interactive element.
+baseRadius = "full"
+buttonRadius = "full"
+showWidgetBorder = true
+showSidebarBorder = false
+
+# --- type --------------------------------------------------------------------
+# Three slots, matching the mockup's three roles exactly:
+#   Manrope         — body / UI
+#   Instrument Serif — display headings, big numerals
+#   JetBrains Mono   — eyebrow labels, times, metadata
+font = "Manrope, sans-serif"
+headingFont = "Instrument Serif, Georgia, serif"
+codeFont = "JetBrains Mono, monospace"
+
+baseFontSize = 15
+
+# Display headings are the mockup's signature move: large, tight-tracked serif at
+# weight 400 (never bold — the serif carries the emphasis, not the weight).
+headingFontSizes = ["3.4rem", "2.6rem", "1.6rem", "1.15rem", "1rem", "0.9rem"]
+headingFontWeights = [400, 400, 400, 600, 600, 600]
+
+# --- charts ------------------------------------------------------------------
+# These apply to Plotly natively, which is what makes "keep Plotly, theme it to
+# match" cheap: the palette arrives from config, so the view code only has to
+# theme layout (fonts, gridlines, transparent backgrounds), not recolor traces.
+#
+# Categorical order is deliberate: accent cyan first so the primary series reads
+# as the brand color, amber second for the caution series (missed/skipped).
+chartCategoricalColors = ["#84DCDC", "#EACD99", "#6AB0B1", "#B8A0D9", "#5D999B", "#E39B9B"]
+
+# Sequential ramp for the 90-day adherence heatmap: near-background slate at the
+# low end (so empty/low days recede into the page) up to full accent cyan.
+chartSequentialColors = ["#0E141A", "#1B2A30", "#284045", "#35575B", "#426D70", "#508386", "#5D999B", "#6AB0B1", "#77C6C6", "#84DCDC"]
+
+# --- metrics -----------------------------------------------------------------
+metricValueFontSize = "2.2rem"
+metricValueFontWeight = 400
+
+[[theme.fontFaces]]
+family = "Instrument Serif"
+url = "app/static/fonts/InstrumentSerif-italic-latinext.woff2"
+weight = 400
+style = "italic"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Instrument Serif"
+url = "app/static/fonts/InstrumentSerif-italic-latin.woff2"
+weight = 400
+style = "italic"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "Instrument Serif"
+url = "app/static/fonts/InstrumentSerif-latinext.woff2"
+weight = 400
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Instrument Serif"
+url = "app/static/fonts/InstrumentSerif-latin.woff2"
+weight = 400
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/fonts/JetBrainsMono-latinext.woff2"
+weight = 400
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/fonts/JetBrainsMono-latin.woff2"
+weight = 400
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/fonts/JetBrainsMono-latinext.woff2"
+weight = 500
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "JetBrains Mono"
+url = "app/static/fonts/JetBrainsMono-latin.woff2"
+weight = 500
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latinext.woff2"
+weight = 300
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latin.woff2"
+weight = 300
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latinext.woff2"
+weight = 400
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latin.woff2"
+weight = 400
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latinext.woff2"
+weight = 500
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latin.woff2"
+weight = 500
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latinext.woff2"
+weight = 600
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latin.woff2"
+weight = 600
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latinext.woff2"
+weight = 700
+style = "normal"
+unicodeRange = "U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF"
+
+[[theme.fontFaces]]
+family = "Manrope"
+url = "app/static/fonts/Manrope-latin.woff2"
+weight = 700
+style = "normal"
+unicodeRange = "U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD"

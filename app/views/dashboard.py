@@ -44,6 +44,7 @@ a prominent deep-link card and says so, exactly as this task's own
 instruction asks, rather than emitting a broken iframe pointed at nothing.
 """
 
+import html
 import os
 from collections import defaultdict
 from datetime import date, timedelta
@@ -51,19 +52,20 @@ from datetime import date, timedelta
 import plotly.graph_objects as go
 import streamlit as st
 
-from app import db
+from app import db, theme
 
 _WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 _DAY_PART_ORDER = ["morning", "afternoon", "evening", "night"]
 _HEATMAP_WINDOW_DAYS = 90
 
-# Color thresholds for adherence visualization: green ≥90%, amber 70–89%, red <70%
-_COLOR_SCALE = ["#d62728", "#ff7f0e", "#2ca02c"]  # red, amber, green
-_COLOR_SCALE_REVERSED = ["#2ca02c", "#ff7f0e", "#d62728"]  # green, amber, red (for bar chart)
+# Adherence threshold colors live in app/theme.py (ADHERENCE_GOOD/FAIR/POOR and
+# HEATMAP_SCALE) so the bars, the heatmap ramp and any badge share one
+# definition. This module keeps only the emoji indicator used in hover text,
+# which is text, not color.
 
 
-def _get_adherence_color(pct: float) -> str:
-    """Return a color indicator for an adherence percentage."""
+def _get_adherence_indicator(pct: float) -> str:
+    """Emoji indicator for hover text (charts get their color from theme)."""
     if pct >= 90:
         return "🟢"
     elif pct >= 70:
@@ -75,14 +77,14 @@ def _get_adherence_color(pct: float) -> str:
 def render(patient_id: str) -> None:
     """Entry point called by app/app.py inside the Dashboard tab."""
     if not patient_id:
-        st.info("📋 No patient selected. Choose a patient ID in the sidebar to see adherence data.")
+        st.info("No patient selected. Choose a patient ID in the header to see adherence data.")
         return
 
     _render_patient_header(patient_id)
 
-    caregiver_mode = st.toggle("👨‍👩‍👧 Caregiver Mode", value=False)
+    caregiver_mode = st.toggle("Caregiver mode", value=False)
 
-    with st.spinner("📊 Loading adherence data..."):
+    with st.spinner("Loading adherence data..."):
         try:
             stats = db.get_adherence_stats(patient_id, window_days=30)
             daily_rows = db.adherence_summary(patient_id, days=_HEATMAP_WINDOW_DAYS)
@@ -95,7 +97,7 @@ def render(patient_id: str) -> None:
             # rather than hang on SDK retries or dump a raw traceback, degrade to a
             # clear, honest notice. The Today tab still works fully off Lakebase.
             st.warning(
-                "📊 **Adherence analytics require the Databricks workspace.**\n\n"
+                "**Adherence analytics require the Databricks workspace.**\n\n"
                 "This dashboard reads from `neurorx.gold.adherence_facts` (Delta) "
                 "through the SQL warehouse — the analytics store, separate from the "
                 "live Lakebase data the Today tab uses. Connect a workspace "
@@ -139,25 +141,46 @@ def _render_patient_header(patient_id: str) -> None:
     if not patient:
         return
 
-    st.subheader(f"👤 {patient['display_name']}")
+    st.markdown(
+        theme.section_heading("PATIENT", patient["display_name"]),
+        unsafe_allow_html=True,
+    )
+
     meds = patient.get("medications") or []
-    if meds:
-        st.markdown("**Current medications**")
-        for m in meds:
-            times = ", ".join(
-                t.strftime("%H:%M") if hasattr(t, "strftime") else str(t)[:5]
-                for t in (m.get("dose_times") or [])
+    if not meds:
+        st.markdown(
+            theme.eyebrow("No active medications on file for this patient"),
+            unsafe_allow_html=True,
+        )
+        return
+
+    chips = []
+    for m in meds:
+        times = ", ".join(
+            t.strftime("%H:%M") if hasattr(t, "strftime") else str(t)[:5]
+            for t in (m.get("dose_times") or [])
+        )
+        detail = " · ".join(
+            part
+            for part in (
+                m.get("dose_text") or "",
+                f"{m.get('times_per_day')}×/day" if m.get("times_per_day") else "",
+                times,
+                m.get("timing_notes") or "",
             )
-            notes = f" · _{m['timing_notes']}_" if m.get("timing_notes") else ""
-            per_day = m.get("times_per_day")
-            strength = m.get("dose_text") or ""
-            st.markdown(
-                f"- **{m['drug_name']}** {strength} — {per_day}×/day"
-                f"{f' at {times}' if times else ''}{notes}"
-            )
-    else:
-        st.caption("No active medications on file for this patient.")
-    st.divider()
+            if part
+        )
+        chips.append(
+            '<div class="nrx-med"><span class="n">'
+            f'{html.escape(str(m["drug_name"]))}</span>'
+            f'<span class="d">{html.escape(detail)}</span></div>'
+        )
+
+    st.markdown(
+        f'{theme.eyebrow("CURRENT MEDICATIONS")}'
+        f'<div class="nrx-meds">{"".join(chips)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -166,37 +189,61 @@ def _render_patient_header(patient_id: str) -> None:
 
 
 def _render_header_stats(stats: dict) -> None:
-    col1, col2, col3, col4 = st.columns(4)
+    """Four stat cards, matching the mockup's stat row.
 
-    with col1:
-        pct = stats["overall_adherence_pct"]
-        if pct is not None:
-            adherence_label = f"{pct:.0f}%"
-            adherence_color = _get_adherence_color(pct)
-        else:
-            adherence_label = "No Data"
-            adherence_color = None
-        st.metric("Overall Adherence (30d)", adherence_label, help="% of scheduled doses taken on time")
+    Uses `theme.stat_card` rather than `st.metric`: the mockup's card is a mono
+    eyebrow over a large serif value, which `st.metric`'s fixed label/value/delta
+    structure cannot express. The "no data" states stay explicit — an absent
+    adherence figure renders as an em dash, never as 0% or 100%.
+    """
+    pct = stats["overall_adherence_pct"]
+    streak = stats["current_streak_days"]
+    most_missed = stats["most_missed_drug"]
+    most_missed_part = stats["most_missed_daypart"]
 
-    with col2:
-        streak = stats["current_streak_days"]
-        streak_label = f"{streak}-day streak" if streak is not None else "No Data"
-        st.metric("Current Streak", streak_label, help="Consecutive days ending yesterday with ≥90% adherence")
+    cards = [
+        theme.stat_card(
+            "OVERALL ADHERENCE · 30D",
+            f"{pct:.0f}" if pct is not None else "—",
+            unit="%" if pct is not None else "",
+            delta="Share of scheduled doses taken on time",
+        ),
+        theme.stat_card(
+            "CURRENT STREAK",
+            str(streak) if streak is not None else "—",
+            unit="days" if streak is not None else "",
+            delta="Consecutive days ending yesterday at ≥90%",
+        ),
+        theme.stat_card(
+            "MOST-MISSED DRUG",
+            most_missed["drug_name"] if most_missed else "None",
+            delta="Lowest adherence this month",
+        ),
+        theme.stat_card(
+            "MOST-MISSED TIME",
+            most_missed_part["daypart"].title() if most_missed_part else "None",
+            delta="Day part with the most missed doses",
+        ),
+    ]
 
-    with col3:
-        most_missed = stats["most_missed_drug"]
-        most_missed_label = most_missed["drug_name"] if most_missed else "None (🎉 Perfect!)"
-        st.metric("Most-Missed Drug", most_missed_label, help="Drug with lowest adherence this month")
-
-    with col4:
-        most_missed_part = stats["most_missed_daypart"]
-        time_label = most_missed_part["daypart"].title() if most_missed_part else "None (🎉 Perfect!)"
-        st.metric("Most-Missed Time", time_label, help="Time of day with most missed doses")
+    for col, card in zip(st.columns(4, gap="small"), cards):
+        with col:
+            st.markdown(card, unsafe_allow_html=True)
 
     if os.getenv("NEURORX_LOCAL_PG"):
-        st.caption("📊 Source: local Postgres `dose_events` (local-demo path; the deployed app reads `neurorx.gold.adherence_facts` in Delta)")
+        source = (
+            "Source: local Postgres dose_events (local-demo path; "
+            "the deployed app reads neurorx.gold.adherence_facts in Delta)"
+        )
     else:
-        st.caption("📊 Source: `neurorx.app.get_adherence_stats` → `neurorx.gold.adherence_facts` (Delta)")
+        source = (
+            "Source: neurorx.app.get_adherence_stats "
+            "→ neurorx.gold.adherence_facts (Delta)"
+        )
+    st.markdown(
+        f'<div style="margin-top:.7rem">{theme.eyebrow(source)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,20 +252,20 @@ def _render_header_stats(stats: dict) -> None:
 
 
 def _render_adherence_by_drug(stats: dict) -> None:
-    st.markdown("### Adherence by Drug")
+    st.markdown(
+        theme.section_heading("BY MEDICATION", "Adherence by drug"),
+        unsafe_allow_html=True,
+    )
     by_drug = stats["adherence_by_drug"]
     if not by_drug:
-        st.info("📉 No adherence data available yet. Check back once doses are logged.")
+        st.info("No adherence data available yet. Check back once doses are logged.")
         return
 
     by_drug_sorted = sorted(by_drug, key=lambda d: d["adherence_pct"])
 
-    bar_colors = [
-        "#d62728" if d["adherence_pct"] < 70
-        else "#ff7f0e" if d["adherence_pct"] < 90
-        else "#2ca02c"
-        for d in by_drug_sorted
-    ]
+    # Threshold colors come from theme.adherence_color so the bars, the heatmap
+    # legend and the caption below cannot drift apart.
+    bar_colors = [theme.adherence_color(d["adherence_pct"]) for d in by_drug_sorted]
 
     fig = go.Figure(
         go.Bar(
@@ -228,18 +275,19 @@ def _render_adherence_by_drug(stats: dict) -> None:
             marker=dict(color=bar_colors),
             text=[f"{d['adherence_pct']:.0f}%" for d in by_drug_sorted],
             textposition="outside",
+            textfont=dict(family="JetBrains Mono, monospace", size=11),
             hovertemplate="%{y}: %{x:.0f}%<extra></extra>",
         )
     )
-    fig.update_layout(
-        xaxis=dict(title="Adherence %", range=[0, 105]),
-        yaxis=dict(title=""),
-        height=max(250, 60 * len(by_drug_sorted)),
-        margin=dict(l=120, r=50, t=30, b=30),
-        showlegend=False,
-    )
+    theme.style_plotly(fig, height=max(240, 54 * len(by_drug_sorted)))
+    fig.update_layout(margin=dict(l=10, r=48, t=8, b=24))
+    fig.update_xaxes(range=[0, 108], title="")
+    fig.update_yaxes(title="")
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("📊 Worst-first: drugs needing attention at top")
+    st.markdown(
+        theme.eyebrow("Worst-first — drugs needing attention at top"),
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -267,11 +315,16 @@ def _aggregate_daily_adherence(daily_rows: list[dict]) -> dict[date, float]:
 
 
 def _render_calendar_heatmap(daily_rows: list[dict]) -> None:
-    st.markdown(f"### Adherence — Last {_HEATMAP_WINDOW_DAYS} Days")
+    st.markdown(
+        theme.section_heading(
+            f"LAST {_HEATMAP_WINDOW_DAYS} DAYS", "Dose heatmap"
+        ),
+        unsafe_allow_html=True,
+    )
 
     pct_by_date = _aggregate_daily_adherence(daily_rows)
     if not pct_by_date:
-        st.info("📅 No adherence data available yet for this period.")
+        st.info("No adherence data available yet for this period.")
         return
 
     today = date.today()
@@ -287,7 +340,7 @@ def _render_calendar_heatmap(daily_rows: list[dict]) -> None:
         pct = pct_by_date.get(current)
         z[weekday_idx][week_idx] = pct
         if pct is not None:
-            status_emoji = _get_adherence_color(pct)
+            status_emoji = _get_adherence_indicator(pct)
             hover_text[weekday_idx][week_idx] = f"{current.strftime('%a, %b %d')}: {pct:.0f}% {status_emoji}"
         else:
             hover_text[weekday_idx][week_idx] = f"{current.strftime('%a, %b %d')}: No data"
@@ -297,18 +350,32 @@ def _render_calendar_heatmap(daily_rows: list[dict]) -> None:
             z=z,
             y=_WEEKDAY_LABELS,
             x=[f"Wk {w + 1}" for w in range(num_weeks)],
-            colorscale=_COLOR_SCALE,
+            colorscale=theme.HEATMAP_SCALE,
             zmin=0,
             zmax=100,
             hoverongaps=False,
+            xgap=3,
+            ygap=3,
             text=hover_text,
             hoverinfo="text",
-            colorbar=dict(title="Adherence %", ticksuffix="%"),
+            colorbar=dict(
+                title="",
+                ticksuffix="%",
+                thickness=6,
+                outlinewidth=0,
+                tickfont=dict(family="JetBrains Mono, monospace", size=9),
+            ),
         )
     )
-    fig.update_layout(height=320, margin=dict(l=60, r=60, t=30, b=30), showlegend=False)
+    theme.style_plotly(fig, height=300)
+    fig.update_layout(margin=dict(l=10, r=10, t=8, b=8))
+    fig.update_xaxes(showgrid=False, title="")
+    fig.update_yaxes(showgrid=False, title="")
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("🟢 Green: ≥90%  ·  🟡 Amber: 70–89%  ·  🔴 Red: <70%")
+    st.markdown(
+        theme.eyebrow("Low ▸ high · hover a cell for its date and percentage"),
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +384,10 @@ def _render_calendar_heatmap(daily_rows: list[dict]) -> None:
 
 
 def _render_time_of_day_pattern(daily_rows: list[dict]) -> None:
-    st.markdown("### When Doses Get Missed")
+    st.markdown(
+        theme.section_heading("BY DAY PART", "When doses get missed"),
+        unsafe_allow_html=True,
+    )
 
     missed_by_part: dict[str, int] = defaultdict(int)
     skipped_by_part: dict[str, int] = defaultdict(int)
@@ -326,14 +396,14 @@ def _render_time_of_day_pattern(daily_rows: list[dict]) -> None:
         skipped_by_part[row["day_part"]] += row["skipped_doses"]
 
     if not any(missed_by_part.values()) and not any(skipped_by_part.values()):
-        st.info("🎉 No missed or skipped doses in this window!")
+        st.info("No missed or skipped doses in this window.")
         return
 
     day_part_labels = {
-        "morning": "🌅 Morning",
-        "afternoon": "☀️ Afternoon",
-        "evening": "🌆 Evening",
-        "night": "🌙 Night",
+        "morning": "Morning",
+        "afternoon": "Afternoon",
+        "evening": "Evening",
+        "night": "Night",
     }
 
     fig = go.Figure(
@@ -342,28 +412,38 @@ def _render_time_of_day_pattern(daily_rows: list[dict]) -> None:
                 name="Missed",
                 x=[day_part_labels.get(p, p.title()) for p in _DAY_PART_ORDER],
                 y=[missed_by_part.get(p, 0) for p in _DAY_PART_ORDER],
-                marker_color="#d62728",
+                marker_color=theme.ADHERENCE_POOR,
                 hovertemplate="Missed: %{y}<extra></extra>",
             ),
             go.Bar(
                 name="Skipped",
                 x=[day_part_labels.get(p, p.title()) for p in _DAY_PART_ORDER],
                 y=[skipped_by_part.get(p, 0) for p in _DAY_PART_ORDER],
-                marker_color="#ff7f0e",
+                marker_color=theme.ADHERENCE_FAIR,
                 hovertemplate="Skipped: %{y}<extra></extra>",
             ),
         ]
     )
+    theme.style_plotly(fig, height=300)
     fig.update_layout(
         barmode="group",
-        xaxis=dict(title=""),
-        yaxis=dict(title="Dose Count"),
-        height=320,
-        margin=dict(l=50, r=30, t=30, b=50),
-        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
+        bargap=0.45,
+        margin=dict(l=10, r=10, t=8, b=36),
+        showlegend=True,
+        legend=dict(
+            orientation="h", yanchor="top", y=-0.14, xanchor="left", x=0,
+            font=dict(family="JetBrains Mono, monospace", size=10),
+        ),
     )
+    fig.update_xaxes(showgrid=False, title="")
+    fig.update_yaxes(title="")
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("🔴 Missed = unactioned after planned time  ·  🟠 Skipped = intentionally not taken")
+    st.markdown(
+        theme.eyebrow(
+            "Missed = unactioned after planned time · skipped = intentionally not taken"
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -372,28 +452,51 @@ def _render_time_of_day_pattern(daily_rows: list[dict]) -> None:
 
 
 def _render_caregiver_panel() -> None:
-    st.markdown("## 👨‍👩‍👧 Caregiver: Ask Genie")
-    st.caption("Natural language questions about adherence trends (requires Genie Space setup)")
+    st.markdown(
+        theme.section_heading("CAREGIVER ANALYTICS", "Ask Genie"),
+        unsafe_allow_html=True,
+    )
 
     genie_embed_url = os.getenv("GENIE_EMBED_URL")
     genie_space_url = os.getenv("GENIE_SPACE_URL")
 
     if genie_embed_url:
+        # Escaped even though this is operator-set, not user-set: a quote in the
+        # value would otherwise close src="" and let the rest of the env var be
+        # parsed as further iframe attributes. https-only for the same reason a
+        # javascript:/data: value here would be worth catching before render.
+        if not genie_embed_url.lower().startswith("https://"):
+            st.error(
+                "GENIE_EMBED_URL must be an https:// URL — refusing to embed "
+                f"a {genie_embed_url.split(':', 1)[0]!r} URL."
+            )
+            return
         st.markdown(
-            f'<iframe src="{genie_embed_url}" width="100%" height="600" '
-            f'allow="clipboard-write" style="border: 1px solid #ddd; border-radius: 8px;"></iframe>',
+            f'<iframe src="{html.escape(genie_embed_url, quote=True)}" '
+            'width="100%" height="600" '
+            'allow="clipboard-write" '
+            'style="border:1px solid rgba(255,255,255,0.10);border-radius:18px;"></iframe>',
             unsafe_allow_html=True,
         )
-    else:
-        with st.container(border=True):
-            st.warning(
-                "**Genie embedding not yet configured**  \n"
-                "No Genie Space has been created (see ARCHITECTURE.md's priorities). "
-                "This feature will be available once a workspace admin sets it up."
-            )
-            if genie_space_url:
-                st.link_button("📊 Open Genie Space ↗", genie_space_url, use_container_width=True)
-            st.caption(
-                "To enable: set `GENIE_EMBED_URL` (for iframe) or `GENIE_SPACE_URL` (for link) "
-                "in your environment — no code change needed."
-            )
+        return
+
+    # No Genie Space exists for this project (ARCHITECTURE.md §8's cut list puts
+    # it first in line). Render the honest unconfigured state rather than an
+    # iframe pointed at nothing.
+    with st.container(border=True):
+        st.markdown(
+            f'{theme.eyebrow("NOT CONFIGURED")}'
+            '<div style="margin-top:.5rem;font-size:.95rem">'
+            "Natural-language questions about adherence trends become available "
+            "once a workspace admin creates a Genie Space and enables embedding."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        if genie_space_url:
+            st.link_button("Open Genie Space ↗", genie_space_url)
+        st.markdown(
+            theme.eyebrow(
+                "Set GENIE_EMBED_URL (iframe) or GENIE_SPACE_URL (link) — no code change needed"
+            ),
+            unsafe_allow_html=True,
+        )
