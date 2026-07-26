@@ -363,6 +363,34 @@ _COMPONENTS = """
 .nrx-med .n { font-size: 0.85rem; font-weight: 500; }
 .nrx-med .d { font-family: var(--nrx-mono); font-size: 0.58rem; color: var(--nrx-text-38); letter-spacing: 0.05em; }
 
+/* --- home hero ------------------------------------------------------------ */
+.nrx-hero { padding: 4.5rem 0 2.5rem; max-width: 46rem; }
+.nrx-hero h1 {
+  font-family: var(--nrx-serif); font-weight: 400;
+  font-size: clamp(2.6rem, 6vw, 4.2rem); line-height: 1.05;
+  letter-spacing: -0.02em; margin: 0.7rem 0 0;
+}
+.nrx-hero h1 em { font-style: italic; color: var(--nrx-accent); }
+.nrx-hero p {
+  font-size: 1.02rem; color: var(--nrx-text-70);
+  margin: 1.1rem 0 0; max-width: 34rem; line-height: 1.6;
+}
+.nrx-trust { display: flex; flex-wrap: wrap; gap: 0.9rem; margin-top: 3rem; }
+.nrx-trust .nrx-card { flex: 1 1 15rem; }
+.nrx-trust .t { font-size: 0.92rem; font-weight: 500; margin-top: 0.5rem; }
+.nrx-trust .b { font-size: 0.78rem; color: var(--nrx-text-50); margin-top: 0.3rem; line-height: 1.5; }
+
+/* --- auth screens --------------------------------------------------------- */
+.nrx-auth { max-width: 26rem; margin: 3.5rem auto 0; }
+.nrx-auth h2 {
+  font-family: var(--nrx-serif); font-weight: 400; font-size: 2.1rem;
+  letter-spacing: -0.015em; margin: 0.4rem 0 1.4rem;
+}
+.nrx-auth-note {
+  font-size: 0.74rem; color: var(--nrx-text-50);
+  line-height: 1.5; margin-top: 0.9rem;
+}
+
 /* --- citation chip -------------------------------------------------------- */
 .nrx-chip-src {
   font-family: var(--nrx-mono); font-size: 0.55rem; letter-spacing: 0.14em;
