@@ -49,9 +49,12 @@ sys.path.insert(0, _REPO_ROOT)
 
 import streamlit as st
 
-from app import theme
+from app import auth, theme
 from app.views import chat as chat_view
 from app.views import dashboard as dashboard_view
+from app.views import home as home_view
+from app.views import login as login_view
+from app.views import signup as signup_view
 from app.views import today as today_view
 
 st.set_page_config(
@@ -65,65 +68,108 @@ st.set_page_config(
 # nothing paints unstyled on first frame.
 theme.inject()
 
-# ---------------------------------------------------------------------------
-# Patient selector — shared session state across all three tabs
-#
-# Defaults to Margaret Demo (CLAUDE.md's non-negotiables: patient_id
-# 12345678-1234-1234-1234-123456789012), the one patient every synthetic
-# fixture in this project (Task 1.4's cohort, Task 2.9's smoke tests) is
-# built around — a new session should land on a tab that already has real
-# data to show, not an empty state.
-# ---------------------------------------------------------------------------
 MARGARET_DEMO_PATIENT_ID = "12345678-1234-1234-1234-123456789012"
 
-if "patient_id" not in st.session_state:
-    st.session_state.patient_id = MARGARET_DEMO_PATIENT_ID
+
+def _go(url_path: str):
+    """Navigate to a page by url_path, then rerun."""
+    st.session_state["_nav"] = url_path
+    st.rerun()
+
+
+def _render_home() -> None:
+    home_view.render(
+        on_signup=lambda: _go("signup"),
+        on_login=lambda: _go("login"),
+    )
+
+
+def _render_signup() -> None:
+    signup_view.render(
+        on_success=lambda: _go("app"),
+        on_login=lambda: _go("login"),
+    )
+
+
+def _render_login() -> None:
+    login_view.render(
+        on_success=lambda: _go("app"),
+        on_signup=lambda: _go("signup"),
+    )
+
+
+def _render_app_page() -> None:
+    """The signed-in shell: header, safety ticker, three tabs.
+
+    The patient selector is a DEMO SWITCHER, not scoping. It defaults to the
+    signed-in account's own patient, but any patient_id typed here is honoured
+    — auth is deliberately not an access boundary (see app/auth.py).
+    """
+    account = auth.current_account()
+
+    if "patient_id" not in st.session_state:
+        st.session_state.patient_id = account.patient_id
+
+    col_brand, col_patient, col_out = st.columns([4, 1, 1], vertical_alignment="center")
+
+    with col_brand:
+        st.markdown(theme.brand(), unsafe_allow_html=True)
+
+    with col_patient:
+        with st.popover(
+            f"PATIENT  {st.session_state.patient_id[:8]}", use_container_width=True
+        ):
+            st.markdown(
+                theme.eyebrow(f"SIGNED IN AS {account.display_name.upper()}"),
+                unsafe_allow_html=True,
+            )
+            st.session_state.patient_id = st.text_input(
+                "Patient ID",
+                value=st.session_state.patient_id,
+                help=(
+                    "Demo switcher — not access control. Margaret Demo is "
+                    f"{MARGARET_DEMO_PATIENT_ID[:8]}..."
+                ),
+            )
+            st.caption("💊 All data is synthetic and for demo only.")
+
+    with col_out:
+        if st.button("Sign out", use_container_width=True):
+            auth.sign_out()
+            st.session_state.pop("patient_id", None)
+            _go("home")
+
+    # Persistent safety notice — every tab, no dismiss control (Task 3.4
+    # Requirement 1). Rendered before the tab widget, so it sits above all
+    # three tabs rather than inside any one of them.
+    theme.safety_ticker()
+
+    tab_chat, tab_today, tab_dashboard = st.tabs(["Chat", "Today", "Dashboard"])
+    with tab_chat:
+        chat_view.render(patient_id=st.session_state.patient_id)
+    with tab_today:
+        today_view.render(patient_id=st.session_state.patient_id)
+    with tab_dashboard:
+        dashboard_view.render(patient_id=st.session_state.patient_id)
+
 
 # ---------------------------------------------------------------------------
-# Header: wordmark left, patient control right.
+# Routing
 #
-# The mockup shows the patient as a static pill. The app still needs a way to
-# actually change patients, so the pill is an `st.popover` — the closest real
-# widget to "a pill you click to reveal a control" — with the text input inside
-# it. The sidebar it replaces is hidden in theme.py.
+# The signed-out page set does NOT contain the app page, so while signed out
+# there is nothing for that URL to route to. The gate is structural rather
+# than a render-and-return-early check that a future edit could skip.
+#
+# position="hidden" suppresses Streamlit's own navigation widget, leaving the
+# restyled pill tabs as the only navigation.
 # ---------------------------------------------------------------------------
-col_brand, col_patient = st.columns([4, 1], vertical_alignment="center")
+if auth.current_account() is None:
+    pages = [
+        st.Page(_render_home, title="Home", url_path="home", default=True),
+        st.Page(_render_login, title="Sign in", url_path="login"),
+        st.Page(_render_signup, title="Create account", url_path="signup"),
+    ]
+else:
+    pages = [st.Page(_render_app_page, title="NeuroRx AI", url_path="app", default=True)]
 
-with col_brand:
-    st.markdown(theme.brand(), unsafe_allow_html=True)
-
-with col_patient:
-    with st.popover(
-        f"PATIENT  {st.session_state.patient_id[:8] or '—'}",
-        use_container_width=True,
-    ):
-        st.session_state.patient_id = st.text_input(
-            "Patient ID",
-            value=st.session_state.patient_id,
-            help=(
-                f"Defaults to Margaret Demo ({MARGARET_DEMO_PATIENT_ID[:8]}...), "
-                "the project's canonical demo patient."
-            ),
-        )
-        st.caption("💊 All data is synthetic and for demo only.")
-
-# Persistent safety notice — every tab, no dismiss control (Task 3.4
-# Requirement 1). Rendered before the tab widget, so it sits above all three
-# tabs rather than inside any one of them. UI-level reinforcement of
-# `agent/prompts/system_prompt.md`'s Identity section — belt-and-suspenders
-# with the prompt, not a substitute for it.
-theme.safety_ticker()
-
-# ---------------------------------------------------------------------------
-# Tabs
-# ---------------------------------------------------------------------------
-tab_chat, tab_today, tab_dashboard = st.tabs(["Chat", "Today", "Dashboard"])
-
-with tab_chat:
-    chat_view.render(patient_id=st.session_state.patient_id)
-
-with tab_today:
-    today_view.render(patient_id=st.session_state.patient_id)
-
-with tab_dashboard:
-    dashboard_view.render(patient_id=st.session_state.patient_id)
+st.navigation(pages, position="hidden").run()
