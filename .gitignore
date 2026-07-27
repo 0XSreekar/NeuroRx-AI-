@@ -91,3 +91,9 @@ tmp/
 # Regenerate with `python data/ingestion/04_synthetic_cohort.py` — deterministic
 # at seed=42, so there is no reason to commit ~66k rows of Parquet.
 data/generated/
+
+# Throwaway local artifacts that land in the repo root: single-file HTML
+# bundles exported for preview, and UI screenshots taken while testing.
+# Root-anchored so tracked pages under app/ and design/ are unaffected.
+/*.html
+/*.png
