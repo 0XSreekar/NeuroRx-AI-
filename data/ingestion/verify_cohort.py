@@ -13,6 +13,7 @@ No Spark, no Databricks workspace, no network.
 """
 
 import ast
+import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -39,12 +40,37 @@ def check(name, ok, detail=""):
         _failures.append(name)
 
 
+def require_parquet_engine():
+    """Fail early and readably if neither parquet engine is installed.
+
+    Without this, a missing pyarrow surfaces twice as noise: first as a
+    CalledProcessError from the generator subprocess, then (if that were
+    survived) as pandas' own import error inside `read_parquet`. Neither
+    names the actual fix, which the module docstring already states.
+    """
+    for engine in ("pyarrow", "fastparquet"):
+        if importlib.util.find_spec(engine) is not None:
+            return
+    sys.exit(
+        "verify_cohort: no parquet engine installed (needs pyarrow or fastparquet).\n"
+        "  pip install -r requirements-dev.txt"
+    )
+
+
 def run_generator(out_dir):
-    subprocess.run(
+    result = subprocess.run(
         [sys.executable, str(GENERATOR)],
         env={"NEURORX_COHORT_OUTPUT_DIR": str(out_dir), "PATH": "/usr/bin:/bin"},
-        cwd=REPO, check=True, capture_output=True,
+        cwd=REPO, capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        # `check=True` would raise CalledProcessError, whose traceback shows the
+        # argv and nothing the generator actually printed — the real cause is in
+        # the captured stderr, so surface that instead of a stack trace.
+        sys.exit(
+            f"verify_cohort: {GENERATOR.name} exited {result.returncode}. Its output:\n\n"
+            + (result.stderr.strip() or "(no stderr)")
+        )
     return {t: pd.read_parquet(Path(out_dir) / f"{t}.parquet") for t in TABLES}
 
 
@@ -59,6 +85,7 @@ def curated_drugs():
 
 
 def main():
+    require_parquet_engine()
     with tempfile.TemporaryDirectory() as tmp:
         a, b = Path(tmp) / "run1", Path(tmp) / "run2"
         run1 = run_generator(a)
