@@ -954,11 +954,30 @@ A line-by-line sweep of all ~50 files (~19.3k lines) found and fixed:
    "dbldatagen / Faker" (it's a deterministic numpy generator);
    `manage_schedule.py` still said "Task 1.4 (still broken)".
 
-Not changed, deliberately: `chat_stream()` remains un-guardrailed (a known,
-documented Task-4.5 scope gap — needs a design decision, not a drive-by fix);
+Not changed, deliberately:
 `update_timing`'s partial dose_times/times_per_day mismatch is enforced only
 DB-side (poor error message, correct behavior); `evals/02`'s
 `RetrievalGroundedness` SCORER_ERROR behavior is documented-intentional.
+
+### Guardrail now covers the streaming path (was the larger half of traffic)
+
+`chat_stream()`'s un-guardrailed gap is **closed**. It was not a minor one:
+`app/views/chat.py` calls streaming *first* and `chat()` only as the fallback
+when streaming fails, so the guardrailed path was the exception, not the rule.
+
+The check could not go inside `chat_stream()` — it yields raw events, and both
+guardrail layers need a complete response (regex needs whole sentences, the
+judge needs the finished text). So `chat()`'s inline block was extracted to
+`agent_client.apply_guardrail(parsed, output_items, patient_id)` and both paths
+now call that one function; `_render_streaming_response()` runs it on the
+accumulated text before its final render. Two request paths, one safety
+implementation — a guardrail with two implementations is a guardrail with two
+behaviours.
+
+**Accepted consequence, not fixable by design:** deltas are painted as they
+arrive, so a blocked response is briefly visible before the repaint replaces
+it. Any *new* caller of `chat_stream()` must call `apply_guardrail()` itself —
+`tests/test_guardrail_streaming.py` asserts the existing call site keeps it.
 
 > ⚠️ **Task 1.8 (`setup/phase1_checkpoint.sql`) is well-built — correct table names
 > throughout, matches the frozen contract, correct lexicographic canonical-order check —

@@ -192,7 +192,24 @@ def _render_streaming_response(patient_id: str, history: list[dict]) -> dict | N
             return None
 
         parsed = agent_client.parse_agent_output(last_output_items)
-        placeholder.markdown(parsed["text"] or accumulated_text)
+        if not parsed["text"]:
+            # Nothing usable in the completed items — fall back to what the
+            # deltas accumulated, but keep it inside the same dict so the
+            # guardrail below sees the text that will actually be rendered
+            # rather than an empty string it would trivially pass.
+            parsed = {**parsed, "text": accumulated_text}
+
+        # The primary path is guardrailed here, not in chat_stream(): a
+        # post-generation check needs the whole response, which does not exist
+        # until the stream ends. Same function chat() uses, so both request
+        # paths share one safety implementation.
+        parsed = agent_client.apply_guardrail(parsed, last_output_items, patient_id)
+
+        # Overwrites the token-by-token text already painted above. A blocked
+        # response was therefore briefly visible — unavoidable for a
+        # post-generation guardrail on a streaming render, and the reason this
+        # repaint is not optional.
+        placeholder.markdown(parsed["text"])
         return parsed
 
 

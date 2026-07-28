@@ -237,9 +237,6 @@ def chat(messages: list[dict], patient_id: str) -> dict:
     schedule-change confirmation button under text the safety layer just
     said it can't stand behind.
     """
-    from agent.guardrail import check as guardrail_check
-    from agent.guardrail import tool_trace_from_responses_output
-
     _require_agent_endpoint()
     w = _get_workspace_client()
     response = w.api_client.do(
@@ -248,23 +245,49 @@ def chat(messages: list[dict], patient_id: str) -> dict:
         body={"input": _build_request_messages(messages, patient_id)},
     )
     output_items = response.get("output", [])
-    parsed = parse_agent_output(output_items)
+    return apply_guardrail(parse_agent_output(output_items), output_items, patient_id)
+
+
+def apply_guardrail(parsed: dict, output_items: list[dict], patient_id: str) -> dict:
+    """Run the output guardrail over an already-parsed agent response.
+
+    Extracted from `chat()` so the streaming path can reach the same code
+    rather than a second implementation of it. The two request paths differ
+    only in *when* a complete response exists — `chat()` has one on return,
+    `chat_stream()` only after the stream ends — not in what the safety layer
+    should do with it, and a guardrail with two implementations is a guardrail
+    with two behaviours.
+
+    Blocking replaces the response wholesale — text, citations, and
+    pending_confirmation — because a surviving confirmation card would let the
+    UI render a schedule-change button under text the safety layer just
+    refused to stand behind.
+
+    Callers own the display. On the streaming path the model's text has
+    already been painted token-by-token by the time this runs, so that caller
+    must overwrite what it painted with the returned text; a post-generation
+    guardrail cannot prevent the transient render, only correct it. Both
+    layers need whole sentences (regex) and a complete response (the judge
+    call), so per-delta checking is not an option.
+    """
+    from agent.guardrail import check as guardrail_check
+    from agent.guardrail import tool_trace_from_responses_output
 
     tool_trace = tool_trace_from_responses_output(output_items)
     result = guardrail_check(parsed["text"], tool_trace)
 
-    if not result.allowed:
-        from app.db import log_guardrail_block
+    if result.allowed:
+        return parsed
 
-        log_guardrail_block(
-            model_output_excerpt=parsed["text"][:500],
-            rule_triggered=result.rule_triggered,
-            judge_verdict=result.judge_verdict,
-            patient_id=patient_id,
-        )
-        return {"text": result.safe_fallback_text, "citations": [], "pending_confirmation": None}
+    from app.db import log_guardrail_block
 
-    return parsed
+    log_guardrail_block(
+        model_output_excerpt=parsed["text"][:500],
+        rule_triggered=result.rule_triggered,
+        judge_verdict=result.judge_verdict,
+        patient_id=patient_id,
+    )
+    return {"text": result.safe_fallback_text, "citations": [], "pending_confirmation": None}
 
 
 # ---------------------------------------------------------------------------
@@ -285,19 +308,26 @@ def chat_stream(messages: list[dict], patient_id: str):
     is expected to catch this and fall back to `chat()` with a spinner, per
     Task 3.4's "streaming if supported, else spinner" requirement.
 
-    ⚠️ **This path does NOT go through the output guardrail (Task 4.5).**
-    `chat()` is guardrailed; this function is not, and per Task 3.4 this is
-    the *primary* path `app/views/chat.py` calls (`chat()` is the fallback
-    used only when streaming itself fails) — meaning most live responses
-    currently reach the UI unchecked, not the minority. Task 4.5 was scoped
-    to "wire the call site into app/agent_client.chat" specifically, so this
-    gap is real and deliberate-per-scope, not an oversight, but it means the
-    guardrail's actual coverage today is narrower than "every response"
-    until this function is wired too. A post-generation guardrail can only
-    run on complete text (both its regex layer, which needs whole sentences,
-    and the Haiku judge call), so guardrailing a stream means checking the
-    fully-accumulated text after the stream completes, before the final
-    render — not checking each token-delta as it arrives.
+    **Guardrail coverage — read before calling this directly.** This
+    generator yields raw stream events and cannot guardrail them: a
+    post-generation check needs whole sentences (regex layer) and a complete
+    response (judge call), so there is nothing to check until the stream
+    ends. The check therefore lives one level up, in the caller that
+    accumulates the stream — `app/views/chat.py`'s
+    `_render_streaming_response()` calls `apply_guardrail()` on the parsed
+    result before its final render, which is the same function `chat()` uses.
+
+    This closes what was previously a real gap: streaming is the *primary*
+    path (`chat()` is only the fallback when streaming fails), so while this
+    path was unguardrailed the majority of live responses reached the UI
+    unchecked, not the minority.
+
+    A consequence that cannot be designed away: token deltas are painted as
+    they arrive, so a response that is ultimately blocked was briefly visible
+    before being replaced. Any new caller of this generator must run
+    `apply_guardrail()` on its accumulated output — calling this function and
+    rendering the result directly puts unchecked clinical text in front of a
+    user.
     """
     _require_agent_endpoint()
     from mlflow.deployments import get_deploy_client
