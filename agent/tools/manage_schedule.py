@@ -138,9 +138,33 @@ def validate_payload(action, payload):
     elif action == "update_timing":
         if not isinstance(payload.get("schedule_id"), str):
             return "update_timing requires a 'schedule_id' string."
-        if "dose_times" in payload and "times_per_day" in payload:
-            if len(payload["dose_times"]) != payload["times_per_day"]:
-                return "dose_times length must equal times_per_day."
+        has_times = "dose_times" in payload
+        has_count = "times_per_day" in payload
+        if has_times != has_count:
+            # Sending one alone is not checkable here -- this function is pure
+            # and cannot read the stored counterpart -- so it used to reach the
+            # schedules_frequency_match CHECK and fail as a Postgres constraint
+            # message the model cannot act on. Requiring the pair keeps the
+            # error where it can say something useful.
+            return (
+                "update_timing must send dose_times and times_per_day together "
+                "(include both, even if only one is changing) -- one alone cannot "
+                "be checked against the stored row."
+            )
+        if has_times:
+            if not isinstance(payload["times_per_day"], int) or payload["times_per_day"] <= 0:
+                return "times_per_day must be a positive integer."
+            if (
+                not isinstance(payload["dose_times"], list)
+                or len(payload["dose_times"]) != payload["times_per_day"]
+            ):
+                # isinstance before len(): a non-list dose_times used to raise
+                # TypeError out of a function whose contract is "return an error
+                # string or None", turning a bad payload into a tool crash.
+                return (
+                    "dose_times must be a list whose length equals times_per_day "
+                    "(DATA_CONTRACTS.md schedules_frequency_match)."
+                )
 
     elif action == "remove_drug":
         if not isinstance(payload.get("schedule_id"), str):
@@ -199,7 +223,7 @@ CREATE OR REPLACE FUNCTION {CATALOG}.app.manage_schedule(
   patient_id STRING
     COMMENT 'UUID of the patient whose schedule is being read or changed.',
   action STRING
-    COMMENT 'One of: create_from_extraction (initial write of one or more drugs from a confirmed prescription extraction -- payload: {{"drugs": [{{rxcui, drug_name, dose_text, times_per_day, dose_times, timing_notes?}}], "user_confirmed": true, "confirmed_interactions": true-only-if-a-prior-call-returned-blocked_pending_confirmation}}); add_drug (add one drug to an existing schedule -- payload: {{"drug": {{rxcui, drug_name, dose_text, times_per_day, dose_times, timing_notes?}}, "user_confirmed": true, "confirmed_interactions": same-rule-as-above}}); update_timing (change times_per_day/dose_times/timing_notes on an existing row -- payload: {{"schedule_id", "times_per_day"?, "dose_times"?, "timing_notes"?, "user_confirmed": true}}); remove_drug (soft-delete: sets status to stopped, never a hard delete -- payload: {{"schedule_id", "user_confirmed": true}}); list (read-only, no confirmation needed -- payload: {{"status"?: "active"|"stopped"|"all", default "active"}}).',
+    COMMENT 'One of: create_from_extraction (initial write of one or more drugs from a confirmed prescription extraction -- payload: {{"drugs": [{{rxcui, drug_name, dose_text, times_per_day, dose_times, timing_notes?}}], "user_confirmed": true, "confirmed_interactions": true-only-if-a-prior-call-returned-blocked_pending_confirmation}}); add_drug (add one drug to an existing schedule -- payload: {{"drug": {{rxcui, drug_name, dose_text, times_per_day, dose_times, timing_notes?}}, "user_confirmed": true, "confirmed_interactions": same-rule-as-above}}); update_timing (change times_per_day/dose_times/timing_notes on an existing row -- payload: {{"schedule_id", "times_per_day"?, "dose_times"?, "timing_notes"?, "user_confirmed": true}} -- times_per_day and dose_times must be sent together, with dose_times length equal to times_per_day; sending one alone is rejected); remove_drug (soft-delete: sets status to stopped, never a hard delete -- payload: {{"schedule_id", "user_confirmed": true}}); list (read-only, no confirmation needed -- payload: {{"status"?: "active"|"stopped"|"all", default "active"}}).',
   payload STRING
     COMMENT 'JSON object, shape depends on action -- see the description of the action parameter for the exact schema per action.'
 )
@@ -249,9 +273,33 @@ def _validate_payload(action, payload):
     elif action == "update_timing":
         if not isinstance(payload.get("schedule_id"), str):
             return "update_timing requires a 'schedule_id' string."
-        if "dose_times" in payload and "times_per_day" in payload:
-            if len(payload["dose_times"]) != payload["times_per_day"]:
-                return "dose_times length must equal times_per_day."
+        has_times = "dose_times" in payload
+        has_count = "times_per_day" in payload
+        if has_times != has_count:
+            # Sending one alone is not checkable here -- this function is pure
+            # and cannot read the stored counterpart -- so it used to reach the
+            # schedules_frequency_match CHECK and fail as a Postgres constraint
+            # message the model cannot act on. Requiring the pair keeps the
+            # error where it can say something useful.
+            return (
+                "update_timing must send dose_times and times_per_day together "
+                "(include both, even if only one is changing) -- one alone cannot "
+                "be checked against the stored row."
+            )
+        if has_times:
+            if not isinstance(payload["times_per_day"], int) or payload["times_per_day"] <= 0:
+                return "times_per_day must be a positive integer."
+            if (
+                not isinstance(payload["dose_times"], list)
+                or len(payload["dose_times"]) != payload["times_per_day"]
+            ):
+                # isinstance before len(): a non-list dose_times used to raise
+                # TypeError out of a function whose contract is "return an error
+                # string or None", turning a bad payload into a tool crash.
+                return (
+                    "dose_times must be a list whose length equals times_per_day "
+                    "(DATA_CONTRACTS.md schedules_frequency_match)."
+                )
     elif action == "remove_drug":
         if not isinstance(payload.get("schedule_id"), str):
             return "remove_drug requires a 'schedule_id' string."

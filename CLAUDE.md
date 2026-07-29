@@ -954,9 +954,7 @@ A line-by-line sweep of all ~50 files (~19.3k lines) found and fixed:
    "dbldatagen / Faker" (it's a deterministic numpy generator);
    `manage_schedule.py` still said "Task 1.4 (still broken)".
 
-Not changed, deliberately:
-`update_timing`'s partial dose_times/times_per_day mismatch is enforced only
-DB-side (poor error message, correct behavior); `evals/02`'s
+Not changed, deliberately: `evals/02`'s
 `RetrievalGroundedness` SCORER_ERROR behavior is documented-intentional.
 
 ### Guardrail now covers the streaming path (was the larger half of traffic)
@@ -978,6 +976,30 @@ behaviours.
 arrive, so a blocked response is briefly visible before the repaint replaces
 it. Any *new* caller of `chat_stream()` must call `apply_guardrail()` itself —
 `tests/test_guardrail_streaming.py` asserts the existing call site keeps it.
+
+### `update_timing` validation: three payloads that fell through to Postgres
+
+`validate_payload`'s contract is "an error message string, or None". Three
+`update_timing` payloads broke it, found by running the function rather than
+reading it:
+
+1. **Non-list `dose_times` raised `TypeError`** — `len()` was called before any
+   `isinstance` check, so a bad payload crashed the tool instead of returning
+   an error. The create/add branch had the isinstance check; this branch didn't.
+2. **`times_per_day: 0` returned None** — rejected later by
+   `schedules_times_positive`, DB-side.
+3. **Half the pair returned None** — the previously flagged gap. It's now
+   rejected with a message saying to send both, because a pure function cannot
+   check one against the stored other. `timing_notes`-only updates (neither half
+   present) remain valid.
+
+The tool's SQL `COMMENT` states the pairing rule too, since that string is what
+the model actually reads.
+
+⚠️ **`validate_payload` exists twice** — module-level, and again inside the
+`CREATE FUNCTION` body string. Separate text, so a fix to one silently diverges
+from the deployed UC function. Both were patched;
+`tests/test_manage_schedule_validation.py` asserts the count stays at 2.
 
 > ⚠️ **Task 1.8 (`setup/phase1_checkpoint.sql`) is well-built — correct table names
 > throughout, matches the frozen contract, correct lexicographic canonical-order check —
