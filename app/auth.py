@@ -43,6 +43,14 @@ _hasher = PasswordHasher()
 # entropy, so they are deliberately not applied.
 MIN_PASSWORD_LENGTH = 8
 
+# A hash of a value no one can log in with, used ONLY to burn the same ~20-30 ms
+# of argon2 work on the unknown-email path that the wrong-password path spends.
+# Without it, `authenticate()` returns in microseconds for an unknown email and
+# in ~22 ms for a known one — a timing oracle that answers exactly the question
+# the design says the login form must not answer. Computed once at import so
+# both paths cost the same on every request, including the first.
+_DUMMY_HASH = _hasher.hash("neurorx-timing-equalizer-not-a-credential")
+
 
 class WeakPassword(Exception):
     """Raised when a password is shorter than MIN_PASSWORD_LENGTH."""
@@ -122,9 +130,16 @@ def authenticate(email: str, password: str) -> Optional[Account]:
     Returns the SAME None for an unknown email and for a wrong password, so
     the sign-in form cannot be used to discover which emails have accounts.
     Do not split this into distinct errors for a friendlier message.
+
+    Returning the same value is necessary but not sufficient: the two paths must
+    also take the same time. An unknown email skips argon2 entirely, so without
+    the dummy verify below it answers ~200,000x faster than a known one and the
+    response time leaks what the return value is careful not to. Do not "optimize"
+    that call away.
     """
     row = db.find_account_by_email(email)
     if row is None:
+        verify_password(_DUMMY_HASH, password)
         return None
     if not verify_password(row["password_hash"], password):
         return None
@@ -155,3 +170,98 @@ def current_account() -> Optional[Account]:
     is one of the things swapping in OIDC would fix.
     """
     return st.session_state.get(SESSION_KEY)
+
+
+# ---------------------------------------------------------------------------
+# Self-test
+# ---------------------------------------------------------------------------
+#
+# Run from the repo root with: python -m app.auth
+# (needs requirements.txt installed; -I is not usable here because this is a
+# package module and isolated mode drops the repo root from sys.path)
+#
+# Password logic and the timing property are pure functions of this module plus
+# argon2 — no database, no Streamlit session. The db calls are stubbed, so this
+# exercises the real hasher and the real branch structure of authenticate().
+
+if __name__ == "__main__":
+    import statistics
+    import time
+
+    failures: list[str] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        print(f"{name}: {'PASSED' if ok else 'FAILED'}{' — ' + detail if detail else ''}")
+        if not ok:
+            failures.append(name)
+
+    # --- password primitives ------------------------------------------------
+    pw = "correct-horse-battery"
+    h = hash_password(pw)
+    check("Hash/verify round-trip", verify_password(h, pw))
+    check("Wrong password rejected", not verify_password(h, "not-the-password"))
+    # Print the parameter prefix only — never the salt or the digest.
+    check(
+        "Hash is not the plaintext",
+        pw not in h and h.startswith("$argon2id$"),
+        "$".join(h.split("$")[:4]) + "$...",
+    )
+
+    try:
+        hash_password("short")
+        check("Short password raises WeakPassword", False)
+    except WeakPassword:
+        check("Short password raises WeakPassword", True)
+
+    check(
+        "Corrupt stored hash reads as failed login, not a traceback",
+        verify_password("$argon2id$totally-not-a-valid-hash", pw) is False,
+    )
+
+    # --- the anti-enumeration property --------------------------------------
+    # Stub app.db so authenticate() runs without a database. KNOWN_EMAIL exists
+    # with a hash of `pw`; anything else is an unknown email.
+    KNOWN_EMAIL = "known@example.test"
+    _known_row = {
+        "account_id": "acct-1",
+        "email": KNOWN_EMAIL,
+        "display_name": "Known User",
+        "patient_id": "pat-1",
+        "password_hash": h,
+    }
+    db.find_account_by_email = lambda email: (  # type: ignore[assignment]
+        _known_row if email == KNOWN_EMAIL else None
+    )
+    db.touch_last_login = lambda account_id: None  # type: ignore[assignment]
+
+    check("Known email + right password authenticates", authenticate(KNOWN_EMAIL, pw) is not None)
+    check("Known email + wrong password returns None", authenticate(KNOWN_EMAIL, "wrong-one") is None)
+    check("Unknown email returns None", authenticate("nobody@example.test", pw) is None)
+
+    def median_ms(email: str, n: int = 7) -> float:
+        samples = []
+        for _ in range(n):
+            t0 = time.perf_counter()
+            authenticate(email, "some-wrong-password")
+            samples.append((time.perf_counter() - t0) * 1000)
+        return statistics.median(samples)
+
+    known_ms = median_ms(KNOWN_EMAIL)
+    unknown_ms = median_ms("nobody@example.test")
+    ratio = max(known_ms, unknown_ms) / max(min(known_ms, unknown_ms), 1e-9)
+
+    # Both paths do exactly one argon2 verify, so they should land within a small
+    # factor of each other. 2x is loose enough to survive a noisy CI runner and
+    # still fail loudly if the dummy verify is ever removed (that regression
+    # showed a ~200,000x ratio when this test was written).
+    check(
+        "Unknown-email and wrong-password paths take comparable time",
+        ratio < 2.0,
+        f"known={known_ms:.1f}ms unknown={unknown_ms:.1f}ms ratio={ratio:.2f}x",
+    )
+
+    print()
+    if failures:
+        print(f"{len(failures)} SELF-TEST(S) FAILED: {', '.join(failures)}")
+        raise SystemExit(1)
+    print("ALL SELF-TESTS PASSED")

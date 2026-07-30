@@ -957,6 +957,31 @@ A line-by-line sweep of all ~50 files (~19.3k lines) found and fixed:
 Not changed, deliberately: `evals/02`'s
 `RetrievalGroundedness` SCORER_ERROR behavior is documented-intentional.
 
+### `authenticate()` leaked by timing what its return value hides
+
+The accounts design (§6) requires that the login form cannot be used to
+enumerate which emails have accounts, and `authenticate()` correctly returns the
+same `None` for unknown-email and wrong-password. **The return value was equal;
+the response time was not.** The unknown-email branch returned before touching
+argon2, so it answered in ~0.0 ms against ~21.6 ms for a known email — a
+~130,000x gap, measured, not estimated. That is a clean enumeration oracle over
+the network: anyone can test an email list against the login form and read the
+answer off a stopwatch, without ever needing a valid password.
+
+Fixed by verifying `password` against a module-level `_DUMMY_HASH` on the
+unknown-email path, so both branches do exactly one argon2 verify. Measured
+after the fix: 20.9 ms vs 20.8 ms, ratio 1.01x.
+
+`app/auth.py` now has a self-test (`python -m app.auth`) covering the password
+primitives and this timing property, asserting the two paths stay within 2x.
+Verified it is a real regression guard, not decoration: reverting only the dummy
+verify makes it fail at 129,963x.
+
+**The general shape is worth remembering:** "returns the same value" and "is
+indistinguishable" are different claims. A constant-time *contract* has to be
+tested by measurement — reading the function cannot tell you the two branches
+cost the same, and this one read as correct for as long as it existed.
+
 ### Guardrail now covers the streaming path (was the larger half of traffic)
 
 `chat_stream()`'s un-guardrailed gap is **closed**. It was not a minor one:

@@ -130,7 +130,12 @@ sign_out() -> None
 - Only the hash is stored. The plaintext is never written to the database, never
   logged, and never placed in `st.session_state`.
 - `authenticate()` returns the same `None` for unknown-email and wrong-password, so the
-  login form cannot be used to enumerate which emails have accounts.
+  login form cannot be used to enumerate which emails have accounts. **Equal return values
+  are not enough** — the unknown-email path originally skipped argon2 and answered ~130,000x
+  faster (measured: 0.0 ms vs 21.6 ms), leaking exactly what the equal return value hides.
+  `authenticate()` now runs a throwaway verify against a module-level `_DUMMY_HASH` on the
+  unknown-email path; both paths do one argon2 verify and land within ~1.02x of each other.
+  `app/auth.py`'s self-test measures the ratio and fails above 2x.
 - A **minimum of 8 characters** is enforced at signup, raising `WeakPassword`. Length
   is the only rule: composition rules (a digit, a symbol, mixed case) push people toward
   predictable substitutions and are not applied here.
