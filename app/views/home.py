@@ -22,27 +22,38 @@ def render(on_signup: Callable[[], None], on_login: Callable[[], None]) -> None:
     Navigation is injected as callbacks rather than imported, so this view has
     no dependency on the router and stays trivially testable.
     """
-    st.markdown(theme.brand(), unsafe_allow_html=True)
+    # The animated layer sits behind everything; emit it first.
+    st.markdown(theme.live_background(), unsafe_allow_html=True)
+    st.markdown(theme.brand(href="/"), unsafe_allow_html=True)
 
-    st.markdown(
-        '<div class="nrx-hero">'
-        f'{theme.eyebrow("MEDICATION SCHEDULES, ORGANIZED")}'
-        "<h1>Every answer traced back to<br>the <em>label it came from</em>.</h1>"
-        "<p>NeuroRx AI turns a prescription into a schedule you can actually keep — "
-        "dose reminders, interaction checks, and adherence you can see. Clinical "
-        "facts come from deterministic lookups over FDA labels, each one cited. "
-        "This is an organizational assistant, not medical advice.</p>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    # Hero: copy and calls-to-action on the left, a product preview filling the
+    # right. Real st.columns rather than one HTML block, because the CTAs must
+    # stay real st.button widgets to trigger navigation.
+    col_copy, col_preview = st.columns([1.15, 1], gap="large", vertical_alignment="center")
 
-    col_signup, col_login, _ = st.columns([1, 1, 3])
-    with col_signup:
-        if st.button("Create account", type="primary", use_container_width=True):
-            on_signup()
-    with col_login:
-        if st.button("Sign in", use_container_width=True):
-            on_login()
+    with col_copy:
+        st.markdown(
+            '<div class="nrx-hero">'
+            f'{theme.eyebrow("MEDICATION SCHEDULES, ORGANIZED")}'
+            "<h1>Every answer traced back to<br>the <em>label it came from</em>.</h1>"
+            "<p>NeuroRx AI turns a prescription into a schedule you can actually keep — "
+            "dose reminders, interaction checks, and adherence you can see. Clinical "
+            "facts come from deterministic lookups over FDA labels, each one cited. "
+            "This is an organizational assistant, not medical advice.</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        col_signup, col_login = st.columns(2)
+        with col_signup:
+            if st.button("Create account", type="primary", use_container_width=True):
+                on_signup()
+        with col_login:
+            if st.button("Sign in", use_container_width=True):
+                on_login()
+
+    with col_preview:
+        st.markdown(theme.hero_preview(), unsafe_allow_html=True)
 
     cards = [
         (

@@ -237,6 +237,14 @@ _COMPONENTS = """
   padding: 0.2rem 0 0.9rem;
 }
 .nrx-logo { font-family: var(--nrx-serif); font-size: 1.5rem; letter-spacing: -0.01em; }
+/* Clickable wordmark (signed-out screens only — see theme.brand's docstring).
+   Styled as the wordmark itself, not as a link: no underline, inherits colour. */
+.nrx-logo-link {
+  text-decoration: none !important; color: inherit !important;
+  display: inline-flex; align-items: center;
+  transition: opacity .25s var(--nrx-ease);
+}
+.nrx-logo-link:hover { opacity: .72; }
 .nrx-logo-badge {
   font-family: var(--nrx-mono); font-size: 0.55rem; letter-spacing: 0.18em;
   border: 1px solid var(--nrx-hairline); border-radius: 6px;
@@ -363,6 +371,124 @@ _COMPONENTS = """
 .nrx-med .n { font-size: 0.85rem; font-weight: 500; }
 .nrx-med .d { font-family: var(--nrx-mono); font-size: 0.58rem; color: var(--nrx-text-38); letter-spacing: 0.05em; }
 
+/* --- live animated background --------------------------------------------
+   The mockup paints this on a <canvas>: four drifting radial-gradient blobs
+   composited with 'lighter', plus 90 twinkling stars, driven by
+   requestAnimationFrame. That cannot be ported directly — Streamlit strips
+   <script> from st.markdown, so a render loop can only run inside a
+   components.v1.html iframe, which is sandboxed and could not sit BEHIND page
+   content.
+
+   So it is rebuilt in pure CSS, which runs in the main DOM and layers behind
+   everything. Same four blob colours as the mockup's own `blobs` array
+   (rgb 70,190,210 / 120,130,240 / 200,170,110 / 60,150,200) and the same
+   slow, non-uniform drift periods, so no two blobs ever sync up.
+
+   Depth is real 3D, not just parallax: the container sets `perspective` and
+   each star layer sits at a different translateZ, so layers genuinely scale
+   differently as they drift.
+
+   prefers-reduced-motion disables all of it — the mockup checks the same
+   media query before starting its loop. */
+.nrx-bg {
+  position: fixed; inset: 0; z-index: 0;
+  overflow: hidden; pointer-events: none;
+  perspective: 600px;
+}
+/* Streamlit's own content has no stacking context of its own here, so it is
+   lifted above the fixed background explicitly. */
+[data-testid="stMain"] .block-container { position: relative; z-index: 1; }
+
+.nrx-bg i {
+  position: absolute; display: block; border-radius: 50%;
+  /* 'lighter' in canvas ≈ screen blending for additive colour build-up. */
+  mix-blend-mode: screen;
+  filter: blur(28px);
+}
+.nrx-bg .b1 {
+  width: 62vmax; height: 62vmax; left: -12%; top: -18%;
+  background: radial-gradient(circle, rgba(70,190,210,.16) 0%, rgba(70,190,210,.05) 50%, transparent 70%);
+  animation: nrx-drift-a 34s ease-in-out infinite;
+}
+.nrx-bg .b2 {
+  width: 54vmax; height: 54vmax; right: -14%; top: -22%;
+  background: radial-gradient(circle, rgba(120,130,240,.14) 0%, rgba(120,130,240,.045) 50%, transparent 70%);
+  animation: nrx-drift-b 26s ease-in-out infinite;
+}
+.nrx-bg .b3 {
+  width: 68vmax; height: 68vmax; right: -6%; bottom: -30%;
+  background: radial-gradient(circle, rgba(200,170,110,.13) 0%, rgba(200,170,110,.04) 50%, transparent 70%);
+  animation: nrx-drift-c 30s ease-in-out infinite;
+}
+.nrx-bg .b4 {
+  width: 56vmax; height: 56vmax; left: -8%; bottom: -26%;
+  background: radial-gradient(circle, rgba(60,150,200,.13) 0%, rgba(60,150,200,.04) 50%, transparent 70%);
+  animation: nrx-drift-d 22s ease-in-out infinite;
+}
+
+/* Star layers. Each is a tiled field of 1px dots; the tile repeats, so a
+   slow vertical translate reads as continuous drift with no seam. */
+.nrx-bg u {
+  position: absolute; inset: -50% -50%; display: block;
+  background-repeat: repeat;
+}
+.nrx-bg .s1 {
+  background-image:
+    radial-gradient(1px 1px at 20px 30px, rgba(255,255,255,.40), transparent),
+    radial-gradient(1px 1px at 140px 90px, rgba(255,255,255,.32), transparent),
+    radial-gradient(1px 1px at 90px 170px, rgba(255,255,255,.36), transparent),
+    radial-gradient(1px 1px at 210px 40px, rgba(255,255,255,.28), transparent);
+  background-size: 260px 260px;
+  transform: translateZ(-120px);
+  animation: nrx-stars 120s linear infinite, nrx-twinkle 7s ease-in-out infinite;
+}
+.nrx-bg .s2 {
+  background-image:
+    radial-gradient(1.6px 1.6px at 60px 120px, rgba(255,255,255,.30), transparent),
+    radial-gradient(1.4px 1.4px at 180px 60px, rgba(255,255,255,.24), transparent),
+    radial-gradient(1.6px 1.6px at 120px 220px, rgba(255,255,255,.28), transparent);
+  background-size: 340px 340px;
+  transform: translateZ(-40px);
+  animation: nrx-stars 80s linear infinite reverse, nrx-twinkle 11s ease-in-out infinite;
+}
+.nrx-bg .s3 {
+  background-image:
+    radial-gradient(2px 2px at 100px 80px, rgba(132,220,220,.26), transparent),
+    radial-gradient(1.8px 1.8px at 240px 200px, rgba(255,255,255,.20), transparent);
+  background-size: 420px 420px;
+  transform: translateZ(20px);
+  animation: nrx-stars 55s linear infinite, nrx-twinkle 9s ease-in-out infinite;
+}
+
+@keyframes nrx-drift-a {
+  0%,100% { transform: translate3d(0,0,0)        scale(1);    }
+  50%     { transform: translate3d(7vw,5vh,0)    scale(1.12); }
+}
+@keyframes nrx-drift-b {
+  0%,100% { transform: translate3d(0,0,0)        scale(1.06); }
+  50%     { transform: translate3d(-6vw,7vh,0)   scale(1);    }
+}
+@keyframes nrx-drift-c {
+  0%,100% { transform: translate3d(0,0,0)        scale(1);    }
+  50%     { transform: translate3d(-5vw,-6vh,0)  scale(1.14); }
+}
+@keyframes nrx-drift-d {
+  0%,100% { transform: translate3d(0,0,0)        scale(1.08); }
+  50%     { transform: translate3d(6vw,-5vh,0)   scale(1);    }
+}
+@keyframes nrx-stars {
+  from { background-position: 0 0; }
+  to   { background-position: 0 -1000px; }
+}
+@keyframes nrx-twinkle {
+  0%,100% { opacity: .55; }
+  50%     { opacity: 1;   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nrx-bg i, .nrx-bg u { animation: none !important; }
+}
+
 /* --- home hero ------------------------------------------------------------ */
 .nrx-hero { padding: 4.5rem 0 2.5rem; max-width: 46rem; }
 .nrx-hero h1 {
@@ -375,6 +501,57 @@ _COMPONENTS = """
   font-size: 1.02rem; color: var(--nrx-text-70);
   margin: 1.1rem 0 0; max-width: 34rem; line-height: 1.6;
 }
+/* --- hero preview panel (fills the right of the hero) ----------------------
+   The mockup puts an animated 340-point orb here, drawn on canvas. That needs
+   a render loop, so instead this space shows what the product actually does:
+   a dose row and the citation chip the headline promises. Marked EXAMPLE, and
+   built from the same card/pill/eyebrow primitives as the real Today view, so
+   the landing page cannot drift from the product's own look.
+
+   Tilted with a real 3D rotateY and floated, tying it to the animated
+   background rather than sitting flat on top of it. */
+.nrx-preview-wrap { perspective: 1100px; padding-top: 1.5rem; }
+.nrx-preview {
+  background: linear-gradient(160deg, rgba(255,255,255,.055), rgba(255,255,255,.02));
+  border: 1px solid var(--nrx-hairline);
+  border-radius: 20px; padding: 1.15rem 1.25rem;
+  transform: rotateY(-13deg) rotateX(4deg);
+  transform-style: preserve-3d;
+  box-shadow: 0 30px 70px rgba(0,0,0,.55);
+  animation: nrx-float 9s ease-in-out infinite;
+}
+.nrx-preview .row {
+  display: flex; align-items: center; gap: .7rem;
+  padding: .6rem 0; border-bottom: 1px solid rgba(255,255,255,.055);
+}
+.nrx-preview .row:last-of-type { border-bottom: 0; }
+.nrx-preview .tm {
+  font-family: var(--nrx-mono); font-size: .78rem;
+  color: var(--nrx-text-50); flex: 0 0 3.4rem;
+}
+.nrx-preview .nm { flex: 1; font-size: .92rem; }
+.nrx-preview .nm small {
+  display: block; font-size: .68rem; color: var(--nrx-text-38); margin-top: .1rem;
+}
+.nrx-preview .cite {
+  margin-top: .9rem; padding-top: .85rem;
+  border-top: 1px solid rgba(255,255,255,.08);
+  font-size: .78rem; color: var(--nrx-text-70); line-height: 1.5;
+}
+.nrx-preview .cite .chip {
+  display: inline-flex; align-items: center; gap: .35rem;
+  margin-top: .55rem; padding: .3rem .6rem; border-radius: 999px;
+  background: rgba(132,220,220,.10); border: 1px solid rgba(132,220,220,.28);
+  color: var(--nrx-accent);
+  font-family: var(--nrx-mono); font-size: .55rem; letter-spacing: .12em;
+}
+@keyframes nrx-float {
+  0%,100% { transform: rotateY(-13deg) rotateX(4deg) translateY(0); }
+  50%     { transform: rotateY(-10deg) rotateX(3deg) translateY(-12px); }
+}
+@media (prefers-reduced-motion: reduce) { .nrx-preview { animation: none; } }
+@media (max-width: 900px) { .nrx-preview { transform: none; animation: none; } }
+
 .nrx-trust { display: flex; flex-wrap: wrap; gap: 0.9rem; margin-top: 3rem; }
 .nrx-trust .nrx-card { flex: 1 1 15rem; }
 .nrx-trust .t { font-size: 0.92rem; font-weight: 500; margin-top: 0.5rem; }
@@ -576,13 +753,67 @@ def style_plotly(fig, height: int = 320) -> None:
     fig.update_yaxes(**axis)
 
 
-def brand() -> str:
-    """Wordmark + badge, the left half of the mockup's header."""
+def live_background() -> str:
+    """The animated background layer: four drifting blobs and three star fields.
+
+    Pure CSS (see `_COMPONENTS`) — no canvas, no script, so it renders in the
+    main DOM behind page content rather than inside a sandboxed component
+    iframe. Emit once per page, before anything else.
+    """
     return (
-        '<div class="nrx-header">'
-        '<div><span class="nrx-logo">NeuroRx</span>'
-        '<span class="nrx-logo-badge">AI</span></div></div>'
+        '<div class="nrx-bg" aria-hidden="true">'
+        '<i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i>'
+        '<u class="s1"></u><u class="s2"></u><u class="s3"></u>'
+        "</div>"
     )
+
+
+def hero_preview() -> str:
+    """The hero's right-hand panel: a small, explicitly-labelled EXAMPLE of the
+    product — two dose rows and the citation chip the headline promises.
+
+    The rows are an illustration on a public marketing page, not anyone's data,
+    and they say EXAMPLE so they cannot be mistaken for a real schedule. The
+    home page never touches `app/db.py`.
+    """
+    rows = [
+        ("08:00", "Metformin", "500 mg · with food", "Taken", "accent"),
+        ("19:00", "Lisinopril", "10 mg", "Due now", "warn"),
+    ]
+    row_html = "".join(
+        f'<div class="row"><span class="tm">{_esc(t)}</span>'
+        f'<span class="nm">{_esc(drug)}<small>{_esc(detail)}</small></span>'
+        f"{status_pill(label, tone)}</div>"
+        for t, drug, detail, label, tone in rows
+    )
+    return (
+        '<div class="nrx-preview-wrap"><div class="nrx-preview">'
+        f'{eyebrow("EXAMPLE — TODAY")}'
+        f'<div style="margin-top:.7rem">{row_html}</div>'
+        '<div class="cite">“Skipping one evening dose is common — take the next '
+        "one at its normal time.”"
+        '<span class="chip">FDA LABEL · DOSAGE &amp; ADMINISTRATION</span></div>'
+        "</div></div>"
+    )
+
+
+def brand(href: str | None = None) -> str:
+    """Wordmark + badge, the left half of the mockup's header.
+
+    Pass `href` to make it a link. Callers use `href="/"` on the signed-OUT
+    screens so the wordmark returns to the home page.
+
+    **Do not pass href on the signed-in app page.** Following a real link is a
+    full browser navigation, and `st.session_state` is per-session — so it
+    would sign the user out, which is not what clicking a logo should do.
+    """
+    inner = (
+        '<span class="nrx-logo">NeuroRx</span>'
+        '<span class="nrx-logo-badge">AI</span>'
+    )
+    if href:
+        inner = f'<a class="nrx-logo-link" href="{_esc(href)}" target="_self">{inner}</a>'
+    return f'<div class="nrx-header"><div>{inner}</div></div>'
 
 
 def safety_ticker() -> None:
