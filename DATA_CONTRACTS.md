@@ -127,7 +127,7 @@ Neither `ARCHITECTURE.md` nor the plan names a schema for the Delta version. If 
 
 Plan §4 says gold holds `adherence_facts` *"(from Lakebase sync)"*, and `ARCHITECTURE.md` §2 draws `L -->|synced table| D`. But a synced table is a **mirror** of an OLTP table — same grain, same columns. The specified `adherence_facts` shape (`planned_doses`, `taken_doses`, `missed_doses`, `adherence_pct`, `day_part`) is an **aggregate** over `dose_events`. It cannot be both.
 
-**Recommendation:** `dose_events` syncs to Delta as a mirror; `adherence_facts` is **derived** from that mirror by the Lakeflow pipeline. This makes the sync map in [§9](#9-lakebase--delta-sync-map) explicit and is the only reading consistent with the column list. Requires accepting [F7](#f7).
+**Recommendation:** `dose_events` reaches Delta via CDF and is reduced to current state as `gold.dose_events_synced`; `adherence_facts` is **derived** from that view by the Lakeflow pipeline. This makes the sync map in [§9](#9-lakebase--delta-sync-map) explicit and is the only reading consistent with the column list. Requires accepting [F7](#f7). (Note the wording of this flag — *"a synced table is a mirror"* — was written before Task 3.2 established that the real mechanism is CDF, which is not a mirror at all; the conclusion is unchanged and reinforced.)
 
 ### F4 — `skipped` is unaccounted for in `adherence_facts` {#f4}
 
@@ -568,7 +568,7 @@ Databricks AI Search `DELTA_SYNC` indexes require CDF on the source table. This 
 
 ### 5.3 `neurorx.gold.adherence_facts`
 
-**Layer:** Gold · **Purpose:** Adherence aggregates for the dashboard, Genie, and `get_adherence_stats`. **Derived from the synced `gold.dose_events`, not itself a synced table** ([F3](#f3)).
+**Layer:** Gold · **Purpose:** Adherence aggregates for the dashboard, Genie, and `get_adherence_stats`. **Derived from `gold.dose_events_synced` (joined to `gold.schedules_synced` for `rxcui`), not itself a synced table** ([F3](#f3)).
 
 > Includes `skipped_doses`, which the Task 0.5 spec omits — see [F4](#f4).
 
@@ -576,7 +576,7 @@ Databricks AI Search `DELTA_SYNC` indexes require CDF on the source table. This 
 
 | Column | Type | Nullable | Description |
 |---|---|---|---|
-| `patient_id` | `STRING` | No | FK → `gold.patients.patient_id`. |
+| `patient_id` | `STRING` | No | Logical FK → Lakebase `patients.patient_id`. There is no `gold.patients` in Delta to point at ([§9](#9-lakebase--delta-sync-map)); no constraint is enforced on the Delta side. |
 | `rxcui` | `STRING` | No | FK → `silver.drugs.rxcui`. |
 | `drug_name` | `STRING` | No | Denormalized display name. |
 | `event_date` | `DATE` | No | Local calendar date of `planned_ts`. |
@@ -837,19 +837,27 @@ Point 3 is easy to miss and would surface as the guardrail blocking the single m
 
 ## 9. Lakebase → Delta sync map
 
-Lakebase syncs to Delta for analytics ([`ARCHITECTURE.md`](ARCHITECTURE.md) §8: *"OLTP where OLTP belongs"*). Mirrors are **read-only in Delta** — writing to a synced table would be overwritten and would corrupt the OLTP-is-truth invariant ([§7.3](#73-lakebase-is-the-sole-source-of-truth-for-patient-state)).
+Lakebase syncs to Delta for analytics ([`ARCHITECTURE.md`](ARCHITECTURE.md) §8: *"OLTP where OLTP belongs"*). The Delta side is **read-only** — writing to it would be overwritten on the next change and would corrupt the OLTP-is-truth invariant ([§7.3](#73-lakebase-is-the-sole-source-of-truth-for-patient-state)).
 
-| Lakebase table | Delta target | Type | Notes |
+> **This section was written against the wrong feature and has been corrected (Task 3.2).** Databricks does have a feature named *synced tables*, but it runs **Delta → Postgres** (reverse ETL). The Postgres → Delta direction this project needs is **Lakebase Change Data Feed (CDF)**, a separately-named feature. See [`lakebase/sync_setup.md`](lakebase/sync_setup.md) for the verification and the runbook.
+>
+> **CDF does not produce a mirror.** Each participating Lakebase table lands in Delta as an append-only SCD Type 2 change log named `lb_<table>_history`, carrying `_pg_change_type` (`insert` / `delete` / `update_preimage` / `update_postimage`), `_pg_lsn`, `_pg_xid`, `_timestamp`, `_sort_by`. One `UPDATE` produces **two** rows. Current state is reconstructed by the materialized views in [`lakebase/sync.sql`](lakebase/sync.sql) — latest `_sort_by` per primary key, excluding keys whose latest event is a delete. **Row-count verification must compare Lakebase against those views, never against the raw history table**, whose count is expected to exceed the live table's and to keep growing.
+
+| Lakebase table | Delta change log (automatic) | Current-state view | Notes |
 |---|---|---|---|
-| `patients` | `neurorx.gold.patients` | Mirror | Read-only. |
-| `schedules` | `neurorx.gold.schedules` | Mirror | Read-only. `dose_times TIME[]` → `ARRAY<STRING>`. |
-| `dose_events` | `neurorx.gold.dose_events` | Mirror | Read-only. The substrate for `adherence_facts`. |
-| `guardrail_blocks` | `neurorx.gold.guardrail_blocks` | Mirror | **Only if [F2](#f2) resolves to Lakebase.** If it resolves to Delta-native, this row disappears and the table is written directly. |
-| — | `neurorx.gold.adherence_facts` | **Derived** | **Not a mirror** ([F3](#f3)). Computed by Lakeflow from `gold.dose_events` + `gold.schedules`. |
-| — | `neurorx.gold.drug_knowledge` | Derived | From `silver.label_sections`. No Lakebase involvement. |
-| — | `neurorx.gold.interaction_pairs` | Derived | From `silver.interactions`. No Lakebase involvement. |
+| `patients` | `lb_patients_history` | *(none yet)* | `REPLICA IDENTITY FULL` is set in `sync.sql` Part A so it participates, but no reconstruction view is built — nothing reads patient rows from Delta today. |
+| `schedules` | `lb_schedules_history` | `neurorx.gold.schedules_synced` | `dose_times TIME[]` → `ARRAY<STRING>`. |
+| `dose_events` | `lb_dose_events_history` | `neurorx.gold.dose_events_synced` | The substrate for `adherence_facts`. Carries **no `rxcui`** — a join to `schedules_synced` is required to get it. |
+| `guardrail_blocks` | `lb_guardrail_blocks_history` | *(none yet)* | **Only if [F2](#f2) resolves to Lakebase.** If it resolves to Delta-native, this row disappears and the table is written directly. |
+| — | — | `neurorx.gold.adherence_facts` | **Derived**, not synced ([F3](#f3)). Computed by Lakeflow from `gold.dose_events_synced` joined to `gold.schedules_synced` (for `rxcui`). |
+| — | — | `neurorx.gold.drug_knowledge` | Derived from `silver.label_sections`. No Lakebase involvement. |
+| — | — | `neurorx.gold.interaction_pairs` | Derived from `silver.interactions`. No Lakebase involvement. |
 
-**Resulting gold layer: seven tables** — three mirrors, three derived, plus `guardrail_blocks` pending [F2](#f2). `ARCHITECTURE.md` §2 names only three ([F7](#f7)) and needs amending.
+The `_synced` suffix is deliberate: these are CDC reconstructions, not naive mirrors, and the name should not imply otherwise. `pipelines/medallion_pipeline.py`'s Phase 3 `SOURCE_TABLE` TODO uses the same names.
+
+**Resulting gold layer: five tables built today** — two current-state views, three derived — plus `patients` / `guardrail_blocks` views if anything ever needs them ([F2](#f2)). `ARCHITECTURE.md` §2 names only three ([F7](#f7)) and needs amending.
+
+**Sync mode: there is nothing to choose.** Lakebase CDF has exactly one mode — continuous WAL streaming, flushed roughly every 15 seconds. Staleness is that ~15s plus one materialized-view refresh cycle.
 
 **Type mapping across the sync boundary:**
 
@@ -881,9 +889,8 @@ Lakebase syncs to Delta for analytics ([`ARCHITECTURE.md`](ARCHITECTURE.md) §8:
 | `neurorx.gold.drug_knowledge` | Gold | `chunk_id` | Frozen — CDF required |
 | `neurorx.gold.interaction_pairs` | Gold | `(rxcui_a, rxcui_b)` | **Deviates — [F6](#f6)** |
 | `neurorx.gold.adherence_facts` | Gold | `(patient_id, rxcui, event_date, day_part)` | **Deviates — [F4](#f4)** |
-| `neurorx.gold.patients` | Gold | `patient_id` | Mirror — [F7](#f7) |
-| `neurorx.gold.schedules` | Gold | `schedule_id` | Mirror — [F7](#f7) |
-| `neurorx.gold.dose_events` | Gold | `event_id` | Mirror — [F7](#f7) |
+| `neurorx.gold.schedules_synced` | Gold | `schedule_id` | CDC current-state view ([§9](#9-lakebase--delta-sync-map)) — [F7](#f7) |
+| `neurorx.gold.dose_events_synced` | Gold | `event_id` | CDC current-state view ([§9](#9-lakebase--delta-sync-map)) — [F7](#f7) |
 | `patients` | Lakebase | `patient_id` | Frozen |
 | `schedules` | Lakebase | `schedule_id` | Frozen |
 | `dose_events` | Lakebase | `event_id` | Frozen |

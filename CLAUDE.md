@@ -568,8 +568,22 @@ refresh cycle, indistinguishable from live for a demo.
 sync map and `medallion_pipeline.py`'s pre-existing Phase 3 TODO both used the
 bare names `gold.schedules`/`gold.dose_events`. Went with the `_synced` names
 (more honest about what these actually are — a CDC reconstruction, not a
-naive mirror) and updated `medallion_pipeline.py`'s comment to match, but
-`DATA_CONTRACTS.md` §9 itself still needs a sign-off edit to agree.
+naive mirror) and updated `medallion_pipeline.py`'s comment to match.
+
+> ✅ **RESOLVED — `DATA_CONTRACTS.md` §9 now agrees.** The sync map was still
+> written against the wrong feature entirely: a four-row "Mirror" table naming
+> `gold.patients`/`gold.schedules`/`gold.dose_events`, which is the
+> (wrong-direction) synced-tables model, not CDF. Rewritten to the real
+> mechanism — per-table `lb_<table>_history` append-only change logs plus the
+> two `_synced` current-state materialized views — with the row-count-
+> verification caveat stated inline (compare against the views, never the raw
+> history table), `dose_events_synced`'s missing `rxcui` noted where the join
+> requirement actually bites, and the single-mode continuous-WAL fact recorded
+> so the "choose continuous vs. triggered" question isn't re-asked. Appendix
+> table index and F3's recommendation updated to match; the two Lakebase
+> tables that participate in CDF but have no reconstruction view (`patients`,
+> `guardrail_blocks`) are listed as such rather than omitted. Gold-layer count
+> in §9 corrected from seven to five built today.
 
 **`pipelines/medallion_pipeline.py`'s `SOURCE_TABLE` was NOT flipped** — the
 existing TODO comment was corrected (right future table name; a `schedules`
