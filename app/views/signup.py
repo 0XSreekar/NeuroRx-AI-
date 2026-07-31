@@ -17,7 +17,9 @@ from app import auth, theme
 
 
 def render(on_success: Callable[[], None], on_login: Callable[[], None]) -> None:
-    st.markdown(theme.brand(), unsafe_allow_html=True)
+    st.markdown(theme.live_background(), unsafe_allow_html=True)
+    # Wordmark returns to the home page (signed-out screens only).
+    st.markdown(theme.brand(href="/"), unsafe_allow_html=True)
     st.markdown(
         f'<div class="nrx-auth">{theme.eyebrow("GET STARTED")}'
         "<h2>Create your account</h2></div>",
