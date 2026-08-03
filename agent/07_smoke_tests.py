@@ -44,7 +44,6 @@
 # COMMAND ----------
 
 import json
-import re
 import sys
 import time
 from pathlib import Path
@@ -67,9 +66,34 @@ MARGARET_DEMO_PATIENT_ID = "12345678-1234-1234-1234-123456789012"
 # Test data
 TEST_PATIENT_EMAIL = "test_patient_smoke_001@neurorx.test"
 
-# Citation regex — exact pattern from Task 2.5 Data_CONTRACTS.md §8 and Task 2.8 verification
-CHUNK_ID_PATTERN = re.compile(r"\[[0-9a-f-]{36}:[a-z_]+:\d{4}\]")
-DDI_SOURCE_PATTERN = re.compile(r"\[source:\s*\w+\]")
+# Citation regexes — imported from their canonical definitions, not re-derived
+# here. `app/agent_client.py`'s own comment already names this file as one of the
+# sharers of "one citation-recognition pattern... not re-derived per file", but
+# this file had in fact carried private copies, and both had drifted:
+#
+#   CHUNK_ID_PATTERN — the local copy had no capture group, so `.findall()`
+#   returned whole `[bracketed]` matches instead of bare chunk_ids.
+#   `evals/02_run_evaluation.py` records that exact divergence as a real bug it
+#   hit: a bracketed match never equals a tool result's bare `chunk_id` field, so
+#   every correctly-cited response scored as fabricated. Harmless in *this* file
+#   (matches are only counted and printed), which is precisely why it survived —
+#   a harmless-today copy is still the thing the next file copies. Printed
+#   citations are now bare chunk_ids rather than `[bracketed]`.
+#
+#   DDI_SOURCE_PATTERN — the local copy `\[source:\s*\w+\]` was wrong in both
+#   directions, checked against real citation strings rather than eyeballed:
+#   it MISSED the dual-attested form `[source: ddinter, fda_label]` that
+#   `agent/tools/check_interactions.sql`'s `array_join(sources, ', ')` actually
+#   emits (`\w+` does not span ", "), and it ACCEPTED `[source: made_up]`, a
+#   source this project never cites. `agent/guardrail.py`'s Layer 1 pattern is
+#   the verified form and is what the live guardrail enforces, so the smoke test
+#   now asserts against the same pattern the runtime does.
+#
+# Neither import costs a new dependency: this file already imports `app.config`,
+# and `agent.guardrail` imports nothing beyond `re`, `dataclasses`,
+# `app.agent_client` and `app.config`.
+from app.agent_client import CHUNK_ID_PATTERN
+from agent.guardrail import INTERACTION_CITATION_PATTERN as DDI_SOURCE_PATTERN
 
 # COMMAND ----------
 
@@ -234,9 +258,26 @@ print(f"Response: {text_2b[:200]}...")
 
 # Expect: check_interactions finds warfarin + ibuprofen
 # manage_schedule returns blocked_pending_confirmation with interaction payload
-if ("interaction" in text_2b.lower() or "blocked" in text_2b.lower()
-    or "major" in text_2b.lower() or "warfarin" in text_2b.lower()):
-    print("✓ Story 2b: Agent detected/reported interaction (expected)")
+#
+# Two separate conditions, reported separately so a live run says which half
+# failed. The second one is the point: this project's spine is that a clinical
+# fact reaching the user without a citation is a defect, and an interaction
+# warning is a clinical fact. A substring check alone passes on the word
+# "warfarin" appearing anywhere — including in an ungrounded claim the agent
+# invented, which is the exact failure this story exists to catch.
+reported_interaction = (
+    "interaction" in text_2b.lower() or "blocked" in text_2b.lower()
+    or "major" in text_2b.lower() or "warfarin" in text_2b.lower()
+)
+ddi_citations_2b = DDI_SOURCE_PATTERN.findall(text_2b)
+
+if reported_interaction and ddi_citations_2b:
+    print(f"✓ Story 2b: Interaction reported and cited — {ddi_citations_2b}")
+elif reported_interaction:
+    print(
+        "✗ Story 2b: Interaction reported WITHOUT a [source: ddinter] citation — "
+        "an uncited clinical claim, which the guardrail's Layer 1 would also flag"
+    )
 else:
     print("✗ Story 2b: No interaction detected in response")
 

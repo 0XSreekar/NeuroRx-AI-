@@ -37,12 +37,17 @@ an uncited clinical fact); this file is what catches it if that fails.
   re-derived per file", referencing `agent/06_deploy_agent.py` and
   `agent/07_smoke_tests.py`) — this file follows that established
   convention rather than adding a fourth copy of the same regex.
-  ⚠️ **Known gap, not fixed here without being asked:** `evals/
-  02_run_evaluation.py` (Task 4.4) currently carries its own independent
-  copy (`LABEL_CITATION_REGEX`/`_CHUNK_ID_CAPTURE_RE`), written before this
-  file existed. It should be switched to import from `app.agent_client` too
-  — flagged for a follow-up pass, not silently changed here since that file
-  belongs to an already-delivered task.
+  The gap this note used to flag — `evals/02_run_evaluation.py` (Task 4.4)
+  carrying its own `LABEL_CITATION_REGEX`/`_CHUNK_ID_CAPTURE_RE` — **is
+  closed**: that file now imports this same `CHUNK_ID_PATTERN`, and its own
+  comment records that its private no-capture-group copy had been a real bug
+  (bracketed matches never equal a bare `chunk_id`, so correctly-cited
+  responses scored as fabricated). `agent/07_smoke_tests.py` was the last
+  private copy and now imports it too. `agent/06_deploy_agent.py` still
+  defines its own — deliberately: it never imports `app.config`, and reaching
+  `app.agent_client` would drag that module's import-time validation of nine
+  required env vars into a deploy notebook that does not otherwise need
+  Lakebase credentials to run.
 - **`tool_trace` (this file's second parameter) does real work: catching
   fabricated citations, not just present-vs-absent ones.** A sentence can
   carry a well-formed `[chunk_id]` that was never actually returned by any

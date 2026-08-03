@@ -91,8 +91,25 @@ from databricks.sdk import WorkspaceClient
 from agent.extraction import extract_schedule
 from app.config import settings
 
-# Same pattern as agent/06_deploy_agent.py (Task 2.8) and agent/07_smoke_tests.py
-# (Task 2.9) — one citation-recognition pattern shared, not re-derived per file.
+# The canonical citation pattern for this project — one definition, imported, not
+# re-derived per file. Importers: agent/guardrail.py (Task 4.5),
+# evals/02_run_evaluation.py (Task 4.4), agent/07_smoke_tests.py (Task 2.9).
+#
+# This comment previously claimed agent/06_deploy_agent.py and
+# agent/07_smoke_tests.py already used "the same pattern". They did not: both
+# carried `\[[0-9a-f-]{36}:[a-z_]+:\d{4}\]` — no capture group — so their
+# `.findall()` returned whole `[bracketed]` matches, not bare chunk_ids. The
+# capture group here is load-bearing, not cosmetic: a bracketed match never
+# equals a tool result's bare `chunk_id` field, so comparing the two scores
+# every correct citation as fabricated. evals/02_run_evaluation.py hit exactly
+# that bug and its comment records it.
+#
+# agent/06_deploy_agent.py is the one remaining private copy, and stays one on
+# purpose: it never imports app.config, and importing this module would pull
+# app/config.py's import-time validation of nine required env vars into a deploy
+# notebook that doesn't otherwise need Lakebase credentials. It only counts and
+# prints matches, so the no-capture-group form is not a defect there — but if it
+# ever compares a match to a chunk_id, it must import this instead.
 CHUNK_ID_PATTERN = re.compile(r"\[([0-9a-f-]{36}:[a-z_]+:\d{4})\]")
 
 ENDPOINT_NAME = "neurorx-agent"  # Task 2.8's deployed endpoint name
