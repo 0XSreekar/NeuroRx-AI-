@@ -630,6 +630,71 @@ def _adherence_summary_local(patient_id: str, days: int = 30) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+def _streak_from_daily_totals(
+    day_totals: dict[date, list[int]],
+    window_days: int,
+    today: Optional[date] = None,
+) -> int:
+    """Consecutive fully-adherent days ending yesterday, per the semantics
+    `agent/tools/get_adherence_stats.sql`'s `streak_calc` CTE defines and the
+    UC function's own COMMENT promises to the agent.
+
+    Split out as a pure function on purpose: this is the one metric
+    `_get_adherence_stats_local` genuinely re-implements rather than reads, and
+    `get_adherence_stats`'s docstring already warns that a second streak
+    implementation risks the two-silently-diverging-implementations problem
+    this project has hit before. A pure function is testable against the SQL's
+    documented behaviour without a live workspace or a Postgres fixture — see
+    `tests/test_adherence_streak.py`.
+
+    Two rules that a naive "walk back while the day is clean" loop gets wrong,
+    both of them documented SQL behaviour, not choices made here:
+
+    1. **The streak is measured to yesterday, not to the newest day with
+       data.** SQL anchors both branches at `date_sub(current_date(), 1)`. If
+       the freshest rows are three days old, those three days are still part
+       of the count.
+    2. **A calendar day with no rows does not break the streak.** The SQL
+       header states it outright: such a day is vacuously adherent — nothing
+       was due, so nothing was missed — and is counted through. `datediff`
+       spans it because it measures calendar distance, not row count.
+
+    `today` is injectable for deterministic tests; it defaults to the host
+    clock. Note the small assumption that comes with that: the window filter in
+    `_adherence_summary_local` is evaluated by Postgres (`CURRENT_DATE`) while
+    this boundary is evaluated by Python, so the two can disagree if the app
+    host and the database sit in different timezones. They do not in the local
+    demo path (`docs/local_dev.md` — same machine); if that ever stops being
+    true, take the reference day from the same connection instead of here.
+    """
+    if not day_totals:
+        return 0
+
+    reference_day = (today or date.today()) - timedelta(days=1)
+
+    # Mirrors the SQL's `WHERE d.taken_doses < d.planned_doses` exactly — a day
+    # with zero planned doses is not a bad day under either spelling.
+    last_bad_day = max(
+        (day for day, (taken, planned) in day_totals.items() if taken < planned),
+        default=None,
+    )
+
+    if last_bad_day is None:
+        # Clean window: count from the earliest day actually covered, so a
+        # history that only starts five days ago reports 5, not a fabricated
+        # `window_days`.
+        streak = (reference_day - min(day_totals)).days + 1
+    else:
+        # The gap between yesterday and the last bad day. Zero when yesterday
+        # itself was the bad day, which is correct.
+        streak = (reference_day - last_bad_day).days
+
+    # The window filter already bounds this; clamping makes the "capped by
+    # window_days" half of the function COMMENT true by construction rather
+    # than by assumption about the caller.
+    return max(0, min(streak, window_days))
+
+
 def _get_adherence_stats_local(patient_id: str, window_days: int = 30) -> dict:
     """Local `get_adherence_stats` equivalent — aggregates the same five metrics
     the UC function returns, from `_adherence_summary_local`'s rows in Python."""
@@ -684,17 +749,7 @@ def _get_adherence_stats_local(patient_id: str, window_days: int = 30) -> dict:
         part, cnt = sorted(missed_by_daypart.items(), key=lambda kv: (-kv[1], kv[0]))[0]
         most_missed_daypart = {"daypart": part, "missed_count": float(cnt)}
 
-    # Streak: consecutive fully-taken days walking back from the most recent
-    # day with data (yesterday for the synthetic cohort), clamped to the window.
-    streak = 0
-    if day_totals:
-        cursor_day = max(day_totals)
-        while streak < window_days and cursor_day in day_totals:
-            taken, planned = day_totals[cursor_day]
-            if planned > 0 and taken < planned:
-                break
-            streak += 1
-            cursor_day = cursor_day - timedelta(days=1)
+    streak = _streak_from_daily_totals(day_totals, window_days)
 
     return {
         "overall_adherence_pct": (

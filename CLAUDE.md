@@ -508,6 +508,31 @@ reasoning `get_adherence_stats` (Task 2.4) already established, applied
 consistently at the app layer so the dashboard and the chat answers never
 disagree about which store is authoritative.
 
+**The local-demo streak silently disagreed with the UC function — found and fixed
+(2026-08-04).** `get_adherence_stats()`'s own docstring warns that reimplementing
+the streak in Python "would risk exactly the kind of two-silently-diverging-
+implementations problem this project has already caught and fixed once" — and
+`_get_adherence_stats_local`, the `NEURORX_LOCAL_PG` path the demo actually runs
+on, was that second implementation. It walked backwards day by day while the day
+was clean, which breaks on two rules the SQL states outright: the streak is
+measured to **yesterday** (both `streak_calc` branches anchor at
+`date_sub(current_date(), 1)`), not to the newest day with rows; and a calendar
+day with **no rows does not break the streak** — it is vacuously adherent and
+`datediff` spans it, whereas a `while day in day_totals` loop stops dead at it.
+Not a reading of the SQL: the `streak_calc` CTE was run for real in DuckDB
+against shared fixtures (CLAUDE.md §4's transpile-and-run), and 3 of 5 cases
+disagreed — an internal gap day reported 2 instead of 5, three days of sync lag
+reported 3 instead of 6. Both under-report, so the demo dashboard would have
+shown a patient a *shorter* streak than the agent quotes from the same window.
+Fixed by extracting `_streak_from_daily_totals()` as a pure function
+implementing the SQL's semantics, now pinned by `tests/test_adherence_streak.py`
+(11 cases, no Postgres or workspace needed). One assumption worth knowing:
+`_adherence_summary_local`'s window filter is evaluated by Postgres
+(`CURRENT_DATE`) while the streak's reference day is evaluated by Python, so the
+two can disagree if app host and database sit in different timezones — they do
+not in the local demo path, and the fix is to take the reference day from the
+same connection if that changes.
+
 **Nothing here has run against a live Databricks workspace** (no serving
 endpoint, no SQL warehouse, no Vector Search reachable from this
 environment) — `chat()`'s endpoint call and `resolve_citations()`'s Delta
