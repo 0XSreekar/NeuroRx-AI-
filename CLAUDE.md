@@ -533,6 +533,41 @@ two can disagree if app host and database sit in different timezones — they do
 not in the local demo path, and the fix is to take the reference day from the
 same connection if that changes.
 
+**The `day_part` rule was three hand-copied CASE blocks, two of them in the same
+file — collapsed to one generator (2026-08-05).** The day after the streak fix
+above, the same duplication pattern was still sitting in `app/db.py` in a second
+place. `todays_doses()` classified `t.planned_ts` with an inline `CASE`, and
+`_LOCAL_DAY_PART_CASE` classified `de.planned_ts` with a byte-identical one
+differing only in table alias. Both docstrings claimed the boundaries were
+therefore "never two silently-drifting reimplementations of the same boundary" —
+which described the intent, not the code: nothing but a comment connected them,
+and the same sentence appeared in `todays_doses()` about
+`pipelines/medallion_pipeline.py`'s Spark `_day_part_expr()`, a third copy. This
+was not a live bug — all three agreed on today's numbers, checked hour by hour —
+and it is recorded as the *hazard* it was, not as a defect found. The streak
+entry above is what this pattern looks like once it has actually drifted.
+
+Boundaries now live once, in `DAY_PART_BANDS`, and both Postgres call sites
+generate their `CASE` from `_day_part_case(ts_expr)`; the emitted SQL is
+whitespace-identical to what each site spelled out before, verified by
+normalizing both against `git show HEAD:app/db.py`. `_day_part_expr()` stays a
+separate copy on purpose — a Lakeflow pipeline must not import a module that
+pulls in `streamlit` and `psycopg` — so `tests/test_day_part_boundaries.py` (37
+cases, no Postgres, no Spark, no workspace) pins it by reading its source, and
+also pins `DAY_PART_BANDS` to `DATA_CONTRACTS.md` §1's frozen table, asserts
+`night` stays the wrapping `ELSE` branch rather than a band, and fails if a new
+hand-written `EXTRACT(HOUR` block reappears anywhere in `app/db.py`. The tests
+were checked for vacuity by mutation, not just run: moving `evening` from 17 to
+18 fails three of them, including the Spark cross-check.
+
+One documented consequence: `app/db.py`'s header used to say "no f-string or
+`%`-formatted SQL anywhere in this file", which was already untrue —
+`_adherence_summary_local` interpolated `_LOCAL_DAY_PART_CASE`. The invariant is
+now stated as what it actually is and always was: no *value* is ever
+interpolated. `_day_part_case()` validates its argument as a bare
+`alias.column` identifier anyway, since a bind parameter cannot carry a column
+reference.
+
 **Nothing here has run against a live Databricks workspace** (no serving
 endpoint, no SQL warehouse, no Vector Search reachable from this
 environment) — `chat()`'s endpoint call and `resolve_citations()`'s Delta

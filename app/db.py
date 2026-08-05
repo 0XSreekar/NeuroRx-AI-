@@ -6,13 +6,22 @@ every function here returns a plain dict (or list of dicts), never an ORM
 object or a database cursor, so the UI layer never needs to know this is
 Postgres underneath.
 
-**Every query is parameterized.** No f-string or `%`-formatted SQL anywhere in
+**Every query is parameterized.** No *value* is ever interpolated into SQL in
 this file — patient-supplied values (patient_id from a URL param, a marked
 dose's timestamp) always go through psycopg's own parameter binding. This is
 not a style preference: `patient_id` ultimately comes from a session/URL
 value a user controls, and string-formatting it into SQL would be a real SQL
 injection surface for a project whose whole safety story is "no clinical fact
 reaches a user without a deterministic, auditable path."
+
+The one exception is structural, not a value: `_day_part_case()` builds a
+constant `CASE` fragment from `DAY_PART_BANDS` and a column name written
+literally in this file. Nothing a user controls reaches it, and it validates
+its argument as a bare `alias.column` identifier regardless. It is
+interpolated rather than bound because a bind parameter cannot carry a column
+reference — and single-sourcing that fragment is worth more than the purity
+of the rule, since the alternative is what this file used to do: keep two
+hand-copied CASE blocks in sync by comment.
 
 ## Two connections, two purposes, deliberately not interchangeable
 
@@ -66,6 +75,7 @@ of scope").
 from __future__ import annotations
 
 import os
+import re
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -75,6 +85,84 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 from app.config import settings
+
+# ---------------------------------------------------------------------------
+# day_part bucketing — one definition, every call site
+# ---------------------------------------------------------------------------
+#
+# `DATA_CONTRACTS.md` §1 fixes the boundaries in local time: morning
+# 05:00–11:59, afternoon 12:00–16:59, evening 17:00–20:59, night 21:00–04:59.
+# `night` wraps midnight, so it is the ELSE branch rather than a contiguous
+# range — every implementation of this rule has to express it that way.
+#
+# These numbers appear exactly once on the app side. Both queries that bucket
+# a timestamp — `todays_doses()` for the Today checklist and
+# `_adherence_summary_local()` for the Dashboard — generate their CASE from
+# `_day_part_case()` below rather than spelling it out. Until now they were
+# two hand-copied CASE blocks differing only in table alias, kept in agreement
+# by a docstring promising they were "never two silently-drifting
+# reimplementations" — which is precisely what they were. `current_streak_days`
+# had the same shape of duplication and did drift (see
+# `tests/test_adherence_streak.py`); this removes the opportunity here instead
+# of testing for it after the fact.
+#
+# `pipelines/medallion_pipeline.py`'s `_day_part_expr()` is a third
+# implementation, in Spark, for `gold.adherence_facts`. It deliberately does
+# NOT import this module — a Lakeflow pipeline must not pull in streamlit and
+# psycopg — so it stays a separate copy, and
+# `tests/test_day_part_boundaries.py` pins it to these same numbers by reading
+# its source.
+DAY_PART_BANDS: tuple[tuple[int, int, str], ...] = (
+    (5, 12, "morning"),
+    (12, 17, "afternoon"),
+    (17, 21, "evening"),
+)
+
+#: The bucket for every hour no band claims — 21:00–04:59, wrapping midnight.
+DAY_PART_WRAPPING = "night"
+
+_QUALIFIED_COLUMN = re.compile(r"[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*")
+
+
+def day_part_for_hour(hour: int) -> str:
+    """The `day_part` for an hour-of-day, in Python.
+
+    The pure twin of `_day_part_case()`: same bands, same wrapping ELSE. Used
+    by tests to check the generated SQL against the contract table without
+    needing a database, and available to any caller that already has an hour.
+    """
+    if not 0 <= hour <= 23:
+        raise ValueError(f"hour out of range: {hour!r}")
+    for start, end, label in DAY_PART_BANDS:
+        if start <= hour < end:
+            return label
+    return DAY_PART_WRAPPING
+
+
+def _day_part_case(ts_expr: str) -> str:
+    """The `day_part` CASE expression over `ts_expr`.
+
+    `ts_expr` is a qualified timestamp column such as `de.planned_ts`, always
+    written literally at the call site — no user-controlled string reaches
+    this function. It is validated as a bare `alias.column` identifier anyway;
+    see the module docstring on why this fragment is interpolated rather than
+    bound.
+    """
+    if not _QUALIFIED_COLUMN.fullmatch(ts_expr):
+        raise ValueError(f"not a bare qualified column: {ts_expr!r}")
+    branches = "\n".join(
+        f"                        WHEN EXTRACT(HOUR FROM {ts_expr}) >= {start}\n"
+        f"                         AND EXTRACT(HOUR FROM {ts_expr}) < {end}"
+        f" THEN '{label}'"
+        for start, end, label in DAY_PART_BANDS
+    )
+    return (
+        "CASE\n"
+        f"{branches}\n"
+        f"                        ELSE '{DAY_PART_WRAPPING}'\n"
+        "                    END"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Lakebase connection pool
@@ -190,14 +278,14 @@ def todays_doses(patient_id: str) -> list[dict]:
     added for Task 3.5 (the Today view), which needs `dose_text` to actually
     display what's being taken, and `day_part` to group the checklist. Per
     Task 3.5's own "no new business logic in the view" instruction,
-    `day_part` is classified here in SQL, not in the view — using the exact
-    same boundaries `pipelines/medallion_pipeline.py`'s `_day_part_expr()`
-    already established for `gold.adherence_facts`
-    (`DATA_CONTRACTS.md` §1: morning 05:00–11:59, afternoon 12:00–16:59,
-    evening 17:00–20:59, night 21:00–04:59 wrapping midnight as the `ELSE`
-    branch) — so a dose bucketed "evening" here and a dose bucketed
-    "evening" in the adherence dashboard are always the same rule, never two
-    silently-drifting reimplementations of the same boundary.
+    `day_part` is classified here in SQL, not in the view — by
+    `_day_part_case()`, the module-level generator that also builds the
+    Dashboard's CASE in `_adherence_summary_local()`. Both come from one
+    `DAY_PART_BANDS` table (`DATA_CONTRACTS.md` §1: morning 05:00–11:59,
+    afternoon 12:00–16:59, evening 17:00–20:59, night 21:00–04:59 wrapping
+    midnight as the `ELSE` branch), so a dose bucketed "evening" here and a
+    dose bucketed "evening" in the adherence dashboard are the same rule by
+    construction rather than by two copies agreeing today.
 
     ⚠️ **No per-patient timezone column exists anywhere in
     `DATA_CONTRACTS.md`.** "Today" here is the Lakebase server's own
@@ -210,7 +298,7 @@ def todays_doses(patient_id: str) -> list[dict]:
     with _get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                """
+                f"""
                 WITH todays_slots AS (
                     SELECT
                         s.schedule_id,
@@ -232,15 +320,7 @@ def todays_doses(patient_id: str) -> list[dict]:
                     de.event_id,
                     de.actioned_ts,
                     COALESCE(de.status, 'planned') AS status,
-                    CASE
-                        WHEN EXTRACT(HOUR FROM t.planned_ts) >= 5
-                         AND EXTRACT(HOUR FROM t.planned_ts) < 12 THEN 'morning'
-                        WHEN EXTRACT(HOUR FROM t.planned_ts) >= 12
-                         AND EXTRACT(HOUR FROM t.planned_ts) < 17 THEN 'afternoon'
-                        WHEN EXTRACT(HOUR FROM t.planned_ts) >= 17
-                         AND EXTRACT(HOUR FROM t.planned_ts) < 21 THEN 'evening'
-                        ELSE 'night'
-                    END AS day_part
+                    {_day_part_case("t.planned_ts")} AS day_part
                 FROM todays_slots t
                 LEFT JOIN dose_events de
                     ON de.schedule_id = t.schedule_id
@@ -543,23 +623,13 @@ def sql_connect():
 # does not exist locally. These functions recompute the same aggregates
 # directly from local `dose_events` (joined to `schedules` for drug_name) so the
 # Dashboard is demonstrable off-workspace. Same window rule as the UC function
-# (Task 2.4): whole days ending yesterday, today excluded; same day-part
-# boundaries as `todays_doses()` / `_day_part_expr()`; adherence = taken/planned
-# (skips count against it, per F4). The streak is a local reimplementation of
-# the UC function's "consecutive fully-taken days ending yesterday" — acceptable
-# here because there is no UC function to call locally, flagged as such.
-
-_LOCAL_DAY_PART_CASE = """
-    CASE
-        WHEN EXTRACT(HOUR FROM de.planned_ts) >= 5
-         AND EXTRACT(HOUR FROM de.planned_ts) < 12 THEN 'morning'
-        WHEN EXTRACT(HOUR FROM de.planned_ts) >= 12
-         AND EXTRACT(HOUR FROM de.planned_ts) < 17 THEN 'afternoon'
-        WHEN EXTRACT(HOUR FROM de.planned_ts) >= 17
-         AND EXTRACT(HOUR FROM de.planned_ts) < 21 THEN 'evening'
-        ELSE 'night'
-    END
-"""
+# (Task 2.4): whole days ending yesterday, today excluded; the day-part CASE is
+# generated by `_day_part_case()` at the top of this file, the same call
+# `todays_doses()` makes, so the Today checklist and the Dashboard cannot
+# bucket the same timestamp differently; adherence = taken/planned (skips count
+# against it, per F4). The streak is a local reimplementation of the UC
+# function's "consecutive fully-taken days ending yesterday" — acceptable here
+# because there is no UC function to call locally, flagged as such.
 
 
 def get_patient(patient_id: str) -> Optional[dict]:
@@ -606,7 +676,7 @@ def _adherence_summary_local(patient_id: str, days: int = 30) -> list[dict]:
                 WITH ev AS (
                     SELECT de.patient_id, s.rxcui, s.drug_name,
                            de.planned_ts::date AS event_date,
-                           {_LOCAL_DAY_PART_CASE} AS day_part,
+                           {_day_part_case("de.planned_ts")} AS day_part,
                            de.status
                     FROM dose_events de
                     JOIN schedules s ON s.schedule_id = de.schedule_id
