@@ -292,6 +292,49 @@ twice-daily one. Confirmed the full grid-construction + plotly figure build
 runs without error and places that day's value at the correct
 (weekday, week) cell.
 
+**Three of the four stat-card sublabels described a different rule than the
+metric above them — fixed (2026-08-06).** The numbers were right; the sentence
+under each one, which is the only explanation of the metric a patient ever
+sees, was not. This is the same divergence shape as the streak (2026-08-04) and
+`day_part` (2026-08-05) entries below, with one difference that makes it worse:
+those two were internal, and this one was on screen.
+
+- **"Share of scheduled doses taken *on time*."** Nothing in this project
+  records on-time-ness. `adherence_pct` is `taken_doses / planned_doses`
+  (DATA_CONTRACTS.md §5.3, frozen), and Today's "I took it late" button writes
+  `status='taken'` with the real late timestamp — deliberately, per Task 3.5 —
+  so a late dose counts in full. The label promised a stricter number than the
+  one displayed.
+- **"Consecutive days ending yesterday at *≥90%*."** `streak_calc` breaks on
+  `taken_doses < planned_doses`: any shortfall at all, and the UC function's own
+  COMMENT says "with every planned dose taken". A patient at 95% for one day
+  sees the streak reset to 0 — correct behaviour that the ≥90% label made look
+  like a defect in the number.
+- **"*Lowest adherence* this month."** `worst_drug` ranks by
+  `SUM(missed_doses) DESC` — a count, not a rate. `app/genie_assets.sql`'s own
+  shipped column comment already says this question "should rank by
+  [`missed_doses`] ... not the inverse of `adherence_pct`". The two genuinely
+  disagree: a twice-daily drug missing 10 of 60 (83%) outranks a once-daily one
+  missing 8 of 30 (73%).
+
+The fourth card ("Day part with the most missed doses") was already correct and
+was left alone — it is what makes the other three read as slips rather than as
+a deliberate house style.
+
+`tests/test_dashboard_stat_labels.py` (16 cases, no Postgres, no streamlit, no
+workspace) pins each label **against the tool's own SQL and the frozen
+contract, not against `dashboard.py`** — so rewording a label cannot make the
+test pass, and changing the rule in SQL without revisiting the label fails here
+instead of silently mislabelling the dashboard. It reads source as text on
+purpose: importing `app.views.dashboard` pulls in streamlit and plotly, the same
+constraint `test_day_part_boundaries.py` already works around. Checked for
+vacuity by mutation, not just run: restoring each of the three original labels
+fails exactly two tests apiece (the specific assertion plus the retired-phrase
+sweep). Writing it also caught a bug in the test itself — anchoring on the bare
+string `"I took it late"` matched `today.py`'s *module docstring* several
+hundred characters before the actual `st.button` call, so the assertion was
+reading the wrong block; now anchored on `st.button("I took it late"`.
+
 ### Task 3.5: App Today view — two real db.py gaps fixed, one undelivered dependency handled gracefully
 
 `app/views/today.py` — dose checklist grouped by day part, next-dose

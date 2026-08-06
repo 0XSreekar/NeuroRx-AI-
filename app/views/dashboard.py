@@ -195,6 +195,32 @@ def _render_header_stats(stats: dict) -> None:
     eyebrow over a large serif value, which `st.metric`'s fixed label/value/delta
     structure cannot express. The "no data" states stay explicit — an absent
     adherence figure renders as an em dash, never as 0% or 100%.
+
+    **Each `delta` line is a claim about how the number above it was computed,
+    so it is held to the same standard as the number.** Three of the four used
+    to describe a different rule than `neurorx.app.get_adherence_stats`
+    actually implements — see `tests/test_dashboard_stat_labels.py`, which
+    pins each label against the tool's own SQL rather than against this
+    file:
+
+    - Overall adherence said "taken **on time**". `adherence_pct` is
+      `taken_doses / planned_doses`, and Today's "I took it late" button writes
+      `status='taken'` with the real late timestamp (`views/today.py`) — a late
+      dose counts in full. Nothing anywhere records on-time-ness.
+    - Current streak said "at **≥90%**". `streak_calc` breaks the streak on
+      `taken_doses < planned_doses`, i.e. any shortfall at all; the UC
+      function's own COMMENT says "with every planned dose taken". A patient at
+      95% for a day sees the streak reset to 0, which the ≥90% label made look
+      like a bug in the number.
+    - Most-missed drug said "**lowest adherence**". `worst_drug` ranks by
+      `SUM(missed_doses) DESC`, a count, not a rate — and `genie_assets.sql`'s
+      column comment says outright that this question "should rank by
+      [missed_doses], not ... the inverse of adherence_pct". The two disagree
+      whenever a twice-daily drug misses more doses at a better percentage than
+      a once-daily one.
+
+    Most-missed time was already correct and is left alone — it is the reason
+    the other three read as slips rather than as a deliberate house style.
     """
     pct = stats["overall_adherence_pct"]
     streak = stats["current_streak_days"]
@@ -206,18 +232,18 @@ def _render_header_stats(stats: dict) -> None:
             "OVERALL ADHERENCE · 30D",
             f"{pct:.0f}" if pct is not None else "—",
             unit="%" if pct is not None else "",
-            delta="Share of scheduled doses taken on time",
+            delta="Doses taken ÷ doses scheduled — a late dose still counts",
         ),
         theme.stat_card(
             "CURRENT STREAK",
             str(streak) if streak is not None else "—",
             unit="days" if streak is not None else "",
-            delta="Consecutive days ending yesterday at ≥90%",
+            delta="Consecutive days ending yesterday with every dose taken",
         ),
         theme.stat_card(
             "MOST-MISSED DRUG",
             most_missed["drug_name"] if most_missed else "None",
-            delta="Lowest adherence this month",
+            delta="Most missed doses — a count, not the lowest percentage",
         ),
         theme.stat_card(
             "MOST-MISSED TIME",
