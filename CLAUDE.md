@@ -1668,6 +1668,35 @@ If you want numeric ordering, change the pipeline, `check_interactions`, **and**
 - `/REST/rxcui/{rxcui}/properties.json` → `{"properties":{"rxcui","name","tty",…}}`.
 - Rate limit: **20 req/sec**, no key needed. NLM asks for 12–24h caching.
 
+> **`rxnorm_client`'s safety invariant is now pinned (2026-08-07).** The module
+> opens with a boxed promise never to silently substitute a different drug, but
+> that promise is four separate `match_type="none"` branches in `get_rxcui()`
+> (no hit at all, **more than one** exact hit, a tie for best fuzzy score, a top
+> score under `APPROXIMATE_SCORE_THRESHOLD`) and none had any coverage.
+> `tests/test_rxnorm_refusal.py` — 14 cases, no network, `_get_json` monkeypatched
+> at the one choke point every public function funnels through. Same shape as the
+> streak/`day_part`/stat-label entries above: the refusals are the safety
+> property, and each one fails *silently and plausibly* — returning `exact_ids[0]`
+> or flipping `<` to `<=` raises nothing, it just hands the confirmation screen a
+> pre-filled RxCUI nobody confirmed.
+>
+> ⚠️ **A real limitation surfaced while writing them: the tie branch can be
+> unreachable.** The docstring claims dedupe prevents both "N copies of one hit"
+> *and* silently truncated alternates. It only does the first — dedupe runs on
+> rows RxNav has **already** truncated to `maxEntries` (4), so when all four
+> returned rows collapse to one rxcui, `get_rxcui` sees a single candidate and the
+> tie check never runs, regardless of whether the input was actually ambiguous.
+> **Not "fixed" by raising `DEFAULT_MAX_APPROXIMATE_ENTRIES`** — which alternates
+> real RxNav drops at a given `maxEntries` needs live calls to establish, and
+> nudging the constant blind would be tuning against a guess. Pinned as current
+> behaviour so changing it is a visible decision, not a silent one.
+>
+> Mutation-checked, and the check earned its keep: five deliberate regressions,
+> and the *first* draft of the dedupe test passed under one of them. Its two rows
+> were ordered so "keep the last score" and "keep the max score" gave the same
+> answer. Reordered so only a real max comparison passes. A test written against
+> a property you never saw fail is a guess about that property.
+
 ### DDInter 2.0
 
 - Download page: `https://ddinter2.scbdd.com/download/`
