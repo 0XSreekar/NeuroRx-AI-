@@ -73,6 +73,7 @@ Per the Task 0.5 instruction, these are surfaced rather than silently resolved. 
 | [F3](#f3) | **Blocker** | `adherence_facts` cannot be "the synced table" — its shape is an aggregate | Phase 1/3 |
 | [F4](#f4) | **Blocker** | `skipped` dose status is unaccounted for in `adherence_facts` | Phase 1 |
 | [F5](#f5) | **Blocker** | No `synthetic_schedules_raw`, but `dose_events.schedule_id` is a required FK | Phase 1 |
+| [F16](#f16) | **Blocker** | `missed_doses` counts a status the app never writes — a missed dose stays `planned` | Phase 3 |
 | [F6](#f6) | Important | `gold.interaction_pairs.source` cannot be single-valued after cross-source dedupe | Phase 1 |
 | [F7](#f7) | Important | Gold holds 3 tables per `ARCHITECTURE.md`, but the sync map needs 3 more | Phase 1/3 |
 | [F8](#f8) | Important | Synthetic cohort has two conflicting paths into the lakehouse | Phase 1/3 |
@@ -248,6 +249,30 @@ One RxCUI can have many SPL Set IDs — a generic drug has a separate label per 
 ### F15 — `payload` type {#f15}
 
 **Severity: Minor.** The task says "STRING/VARIANT payload" without choosing. Specified as `VARIANT` below (native semi-structured type, queryable without an explicit schema, avoids a `parse_json` round-trip in silver). If `VARIANT` is unavailable on the workspace's runtime, `STRING` + `parse_json()` at the silver boundary is an equivalent fallback — but pick one before Phase 1.
+
+### F16 — `missed_doses` counts a status the app never writes {#f16}
+
+**Severity: Blocker.** It puts a false clinical claim in the agent's mouth: *"nothing was missed."*
+
+`adherence_facts.missed_doses` counts only `dose_events` rows where `status = 'missed'` literally, and **no application code path ever writes that status**:
+
+- `app/views/today.py` renders an overdue un-actioned dose as "Missed" at **display time only** — its own module docstring: the row *"genuinely stays `status='planned'` in the database until an explicit `mark_dose()` call"*.
+- `app/jobs/reminders_job.py` pre-creates every upcoming slot as `'planned'`.
+- `app/db.py`'s `mark_dose()` accepts `'missed'`, but no caller passes it.
+- Only `data/ingestion/04_synthetic_cohort.py` writes `'missed'`, and only into the Phase-1 synthetic cohort — which contains no `'planned'` rows at all (`verify_cohort.py` asserts statuses are exactly `{taken, missed, skipped}`). **The synthetic data therefore cannot exhibit this bug, and the demo will look fine.** It appears once `adherence_facts` reads real Lakebase history — the Phase-3 `SOURCE_TABLE` flip in `pipelines/medallion_pipeline.py`.
+
+A genuinely missed dose therefore sits at `'planned'` forever. It lands in `planned_doses`, so it correctly depresses `adherence_pct`, but it is invisible to `missed_doses`.
+
+**This is not a window artifact.** `get_adherence_stats` scopes to `[current_date() - window_days, current_date() - 1]` precisely because *"today is still in progress, so its unactioned doses are `planned`, not `missed`"*. Today is already excluded; every `'planned'` row **inside** the window is a past slot nobody actioned.
+
+Two consequences, both in the agent's mouth, and the agent is instructed to relay these as facts rather than recompute them:
+
+1. `most_missed_drug`/`most_missed_daypart` rank on `missed_doses`, so they name the wrong drug. Verified in DuckDB (`tests/test_adherence_missed_definition.py`): metformin at **0%** adherence (10 past doses, none actioned) against warfarin at **80%** (one explicit `'missed'`) returns `most_missed_drug = warfarin`.
+2. With no literal `'missed'` row anywhere, the metric is omitted entirely — and the function COMMENT defines absence as *"nothing was missed in the window — say that rather than naming a drug."* The agent tells a patient at 0% adherence that nothing was missed.
+
+`pipelines/medallion_pipeline.py`'s `counts_reconcile` expectation is written `taken_doses + skipped_doses + missed_doses <= planned_doses`. The `<=` absorbs the gap, so nothing fires at pipeline runtime and `taken + skipped + missed < planned_doses` passes silently.
+
+**Recommendation:** count a past-dated un-actioned `'planned'` row as missed, in **one** shared definition applied by both `pipelines/medallion_pipeline.py`'s aggregate and `app/db.py`'s `_adherence_summary_local` — fixing one alone recreates the local-vs-UC divergence that the `current_streak_days` fix already had to undo once. This makes `missed_doses` mean "due and not taken" rather than "explicitly flagged", aligns the dashboard with what the Today view already shows the same patient, and lets `counts_reconcile` tighten from `<=` to `=`, which would have caught this. The alternative — a sweep job that writes a real `'missed'` status once a slot lapses — keeps the column's current literal meaning but adds a scheduled writer to the adherence ledger and a new question about how late is late. **Not applied:** either choice changes [§5.3](#53-neurorxgoldadherence_facts)'s frozen column semantics, so it needs sign-off (CLAUDE.md §6). `tests/test_adherence_missed_definition.py` pins the present behaviour meanwhile, so closing this has to be a deliberate edit rather than a number quietly moving on the dashboard.
 
 ---
 

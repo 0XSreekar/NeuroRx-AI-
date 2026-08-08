@@ -1031,6 +1031,52 @@ the agent endpoint, the guardrail's live Haiku judge, and CDF sync — all
 workspace-only. The `fill_missing_rxcuis` synthetic-RxCUI placeholders (107 of
 132 cohort drugs) are a local-only stand-in for the real `gold.drugs` resolution.
 
+### `missed_doses` counts a status nothing writes — filed as F16, not fixed
+
+`adherence_facts.missed_doses` counts `dose_events.status = 'missed'`
+literally. Traced every writer: `today.py` calls an overdue dose "Missed" at
+**render time only** (its own docstring: the row "genuinely stays
+`status='planned'` in the database"), `reminders_job.py` pre-creates slots as
+`'planned'`, `mark_dose()` accepts `'missed'` but no caller passes it, and the
+only producer of `'missed'` is the Phase-1 synthetic generator. So a real
+missed dose sits at `'planned'`: counted in `planned_doses` (correctly
+depressing `adherence_pct`), invisible to `missed_doses`.
+
+**The demo cannot show this, which is why it survived.** The synthetic cohort
+has no `'planned'` rows at all (`verify_cohort.py` asserts statuses are exactly
+`{taken, missed, skipped}`), so every number looks right until
+`adherence_facts` reads real Lakebase history — the Phase-3 `SOURCE_TABLE`
+flip. And `medallion_pipeline.py`'s `counts_reconcile` expectation is written
+`taken + skipped + missed <= planned_doses`; the `<=` absorbs the gap, so no
+expectation fires.
+
+**The consequence is a false clinical claim, not a cosmetic one.**
+`most_missed_drug` ranks on `missed_doses`, and the function COMMENT tells the
+agent these are "facts to be relayed, not estimates to be refined". Run in
+DuckDB against metformin at 0% adherence (10 past doses, none actioned) vs
+warfarin at 80% (one explicit `'missed'`), `most_missed_drug` returns
+**warfarin** — the better-adhered drug — while the `adherence_pct` rows in the
+same result set say the opposite. With no literal `'missed'` row anywhere the
+metric is omitted, and the COMMENT defines absence as "nothing was missed in
+the window — say that rather than naming a drug."
+
+**Flagged, not silently widened** (§6). Either fix — counting past un-actioned
+`'planned'` as missed, or a sweep job that writes a real status — changes
+`DATA_CONTRACTS.md` §5.3's frozen column semantics and needs sign-off. If it's
+the first, it must land in **both** `medallion_pipeline.py`'s aggregate and
+`app/db.py`'s `_adherence_summary_local` in one shared definition; fixing one
+alone recreates exactly the local-vs-UC-function divergence the
+`current_streak_days` work already had to undo once.
+
+`tests/test_adherence_missed_definition.py` (4 tests, DuckDB, no Postgres and
+no workspace) pins the present behaviour and says in its own docstring that
+what it pins is wrong, so closing F16 has to be a deliberate edit to that file
+rather than a number quietly moving on the dashboard. Verified the tests are
+load-bearing by mutating the filter to `status IN ('missed','planned')`: three
+of the four flip to failing and `most_missed_drug` becomes metformin (10). The
+fourth is a control — today's slots, legitimately `'planned'`, are already
+excluded by the window, so F16 is not "the window is too wide".
+
 ### Full-project audit (every source + md file) — 7 findings, all fixed
 
 A line-by-line sweep of all ~50 files (~19.3k lines) found and fixed:
@@ -1927,10 +1973,11 @@ If you want numeric ordering, change the pipeline, `check_interactions`, **and**
 
 ## 5. Open blockers — decisions needed before Phase 1 writes data
 
-From [`DATA_CONTRACTS.md`](DATA_CONTRACTS.md) §2. All five are still unsigned-off.
+From [`DATA_CONTRACTS.md`](DATA_CONTRACTS.md) §2. Five of the six are still unsigned-off.
 
 | ID | Issue | Status |
 |---|---|---|
+| **F16** | `missed_doses` counts `status = 'missed'`, which no app code path ever writes — a genuinely missed dose stays `'planned'` | **Open.** Blocker: `most_missed_drug` names the wrong drug, and its absence tells the agent "nothing was missed" at 0% adherence. Invisible in synthetic data. Pinned by `tests/test_adherence_missed_definition.py`. |
 | **F1** | RxCUI pair ordering lexicographic vs numeric | Contract specifies lexicographic + canary. Needs sign-off. |
 | **F2** | `guardrail_blocks` home: Lakebase (task spec) vs Delta (ARCHITECTURE.md §2/§5(e) + plan §5) | **Open.** 3 sources say Delta, 1 says Lakebase. |
 | **F3** | `adherence_facts` can't be "the synced table" — its shape is an aggregate | **Open.** Must be derived from a synced `dose_events`. |
