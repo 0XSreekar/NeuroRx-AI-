@@ -465,8 +465,23 @@ def mark_dose(
             return dict(row)
 
 
+# Hoisted to module level so tests can execute this exact string rather than a
+# hand-copied paraphrase of it — the same reason Task 3.7 ran reminders_job's
+# real functions instead of extracted SQL. `tests/test_reminder_banner_window.py`
+# runs it in DuckDB.
+UNACKNOWLEDGED_REMINDERS_SQL = """
+SELECT notification_id, patient_id, schedule_id, due_ts, message, acknowledged, created_at
+FROM notifications
+WHERE patient_id = %(patient_id)s
+  AND acknowledged = false
+  AND due_ts::date = CURRENT_DATE
+ORDER BY due_ts DESC
+"""
+
+
 def list_unacknowledged_reminders(patient_id: str) -> list[dict]:
-    """This patient's unacknowledged dose reminders, most-recently-due first.
+    """This patient's unacknowledged dose reminders **for today**,
+    most-recently-due first.
 
     Reads the real `notifications` table (`lakebase/schema.sql`, Task 3.7),
     populated by the scheduled reminders job (`app/jobs/reminders_job.py`).
@@ -477,6 +492,31 @@ def list_unacknowledged_reminders(patient_id: str) -> list[dict]:
     Task 3.7 defines instead has `schedule_id`, `due_ts`, and a plain
     `acknowledged BOOLEAN` — updated here to match, rather than left
     disagreeing with the table that actually exists now.
+
+    ## Why the `due_ts::date = CURRENT_DATE` bound exists
+
+    `acknowledged` starts false and only a human pressing "Dismiss" in the
+    Today view's banner ever flips it. Nothing expires a row. Without a date
+    bound this query returned **every notification ever written for this
+    patient that nobody dismissed**, and `today.py`'s banner renders one
+    `st.info` block per returned row: the reminders job writes ~5 rows/day
+    for the demo cohort's 4 drugs, so a patient who simply doesn't press
+    Dismiss accumulates a growing wall of banners above their checklist,
+    unbounded in the number of days the job has been running.
+
+    The messages are what makes that a safety problem rather than a layout
+    one. `reminders_job.build_message()` produces "Time for your warfarin
+    (5 mg) at 07:00 PM." — **no date**. A four-day-old reminder is therefore
+    indistinguishable from the one for the dose actually due in 20 minutes,
+    and the persona this view is written for (`today.py`'s docstring: a
+    60-year-old managing several chronic prescriptions) is being told to take
+    a dose that isn't due.
+
+    Bounded to `CURRENT_DATE` to match `todays_doses()` above, which scopes
+    its slots the same way — the banner and the checklist beneath it now
+    describe the same day instead of the banner silently spanning all of
+    history. This is not a new policy invented here: it is the scope the view
+    the banner lives in already had.
 
     Still degrades gracefully if `notifications` somehow doesn't exist
     (catches `psycopg.errors.UndefinedTable` specifically, not a bare
@@ -489,12 +529,7 @@ def list_unacknowledged_reminders(patient_id: str) -> list[dict]:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
-                    """
-                    SELECT notification_id, patient_id, schedule_id, due_ts, message, acknowledged, created_at
-                    FROM notifications
-                    WHERE patient_id = %(patient_id)s AND acknowledged = false
-                    ORDER BY due_ts DESC
-                    """,
+                    UNACKNOWLEDGED_REMINDERS_SQL,
                     {"patient_id": patient_id},
                 )
                 return [dict(row) for row in cur.fetchall()]

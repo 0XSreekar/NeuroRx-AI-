@@ -10,7 +10,7 @@ day-part classification, dose_text, and status all come pre-computed from
 in this view — see that function's own docstring); this file only groups,
 formats, and wires buttons to `db.mark_dose()`.
 
-## Two real gaps surfaced and handled, not silently papered over
+## One real gap surfaced and handled, not silently papered over
 
 1. **`db.refill_estimates()` cannot return a real "days remaining" number
    today** — `DATA_CONTRACTS.md` §6.2's `schedules` has no fill-quantity
@@ -19,13 +19,27 @@ formats, and wires buttons to `db.mark_dose()`.
    the data layer doesn't populate yet; this view renders the honest
    "refill tracking not available" state `refill_estimates()` actually
    returns, rather than inventing a number to make the badge fire.
-2. **"The notifications table (Task 3.7)" doesn't exist yet** — Task 3.7
-   (the scheduled Lakeflow Job that would populate it) hasn't been built,
-   and no schema for it exists anywhere in `DATA_CONTRACTS.md`.
-   `db.list_unacknowledged_reminders()` (added this task, flagged as
-   provisional in its own docstring) degrades to an empty list rather than
-   raising, so this view's reminder banner simply doesn't appear yet
-   instead of crashing the whole Today tab over an undelivered dependency.
+## The reminder banner shows today's reminders only
+
+This docstring previously listed the `notifications` table as an undelivered
+dependency — "doesn't exist yet", `list_unacknowledged_reminders()` "flagged as
+provisional", the banner therefore never appearing. **All three are stale.**
+Task 3.7 landed the real table (`lakebase/schema.sql`) and the job that
+populates it (`app/jobs/reminders_job.py`), and `db.py`'s two functions were
+rewritten against the real columns. The banner is live.
+
+Which surfaced a real defect once it was: `notifications.acknowledged` starts
+false and only the Dismiss button below ever flips it, so nothing expires a
+row. `list_unacknowledged_reminders()` was unbounded in time, and this view
+renders one `st.info` per returned row — so a patient who doesn't press Dismiss
+accumulates every reminder ever written for them (~5/day for the demo cohort)
+stacked above their checklist. Worse, `reminders_job.build_message()` carries
+no date: "Time for your warfarin (5 mg) at 07:00 PM." from four days ago reads
+exactly like the dose due in twenty minutes, which tells this view's persona to
+take a dose that isn't due. Fixed in the data layer, where the scoping belongs
+— `db.UNACKNOWLEDGED_REMINDERS_SQL` now bounds to `CURRENT_DATE`, matching
+`todays_doses()`, so the banner and the checklist under it describe the same
+day. Pinned by `tests/test_reminder_banner_window.py`.
 
 ## "Missed" is a display-time judgment, not a stored status
 

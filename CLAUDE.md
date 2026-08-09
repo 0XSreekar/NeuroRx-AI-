@@ -1031,6 +1031,46 @@ the agent endpoint, the guardrail's live Haiku judge, and CDF sync — all
 workspace-only. The `fill_missing_rxcuis` synthetic-RxCUI placeholders (107 of
 132 cohort drugs) are a local-only stand-in for the real `gold.drugs` resolution.
 
+### The reminder banner had no time bound — it would stack every undismissed reminder ever
+
+`db.list_unacknowledged_reminders()` filtered on `patient_id` and
+`acknowledged = false` and nothing else. `acknowledged` starts false and only a
+human pressing Dismiss in the Today banner ever flips it; nothing expires a
+row. `today.py`'s `_render_reminder_banner()` renders **one `st.info` per
+returned row**, so with the reminders job writing ~5 rows/day for the demo
+cohort's 4 drugs, a patient who simply never presses Dismiss gets an unbounded
+stack of banners above their checklist, growing by a day every day the job runs.
+
+**The reason it's a safety bug and not a layout bug is
+`reminders_job.build_message()`: it emits no date.** "Time for your warfarin
+(5 mg) at 07:00 PM." from four days ago is character-for-character the kind of
+message the dose due in twenty minutes produces. This view's stated persona is a
+60-year-old managing several chronic prescriptions, and the banner was telling
+them to take doses that weren't due.
+
+Fixed in the data layer, not the view (`today.py` Requirement 6: no business
+logic there): `AND due_ts::date = CURRENT_DATE`, matching `todays_doses()`'s own
+`CURRENT_DATE` scoping — the banner and the checklist beneath it now describe
+the same day. Not a new policy, just the scope the surrounding view already had.
+
+**The query is now `db.UNACKNOWLEDGED_REMINDERS_SQL` at module level so a test
+can execute the real string** rather than a hand-copied paraphrase — the same
+reasoning Task 3.7 used when it ran `reminders_job`'s real functions instead of
+extracted SQL. `tests/test_reminder_banner_window.py` (5 tests, DuckDB) reads
+that constant out of `app/db.py` with `ast` rather than importing it: importing
+`app.db` drags in streamlit, psycopg, psycopg_pool and `app.config`'s `.env`
+read, and any one of those missing would turn the assertions into a silent skip.
+This is why 13 of the existing test modules can't collect in a bare
+environment — worth copying the `ast` trick where a test only needs a literal.
+Confirmed load-bearing by deleting the bound: 3 of the 5 flip to failing, and
+the 2 that stay green are the two asserting the bound changed *nothing* else
+(ordering, patient scoping, and that Dismiss still works).
+
+While here: `today.py`'s module docstring still listed `notifications` as an
+undelivered dependency — "doesn't exist yet", the function "provisional", the
+banner never appearing. All three went stale when Task 3.7 shipped. Rewritten,
+per §6's warning that a status note in a file is a claim, not a fact.
+
 ### `missed_doses` counts a status nothing writes — filed as F16, not fixed
 
 `adherence_facts.missed_doses` counts `dose_events.status = 'missed'`
