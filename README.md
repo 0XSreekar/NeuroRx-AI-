@@ -218,7 +218,6 @@ automatically, so the same fact is never computed two different ways in two diff
 places. Compute is serverless throughout — SQL warehouse, Vector Search, Model Serving,
 the Lakeflow pipeline, the Databricks App — so cost scales with usage, not with idle
 cluster time.
-perfectly
 ---
 
 *Full architecture reference, decisions log, and phase map:* [`ARCHITECTURE.md`](ARCHITECTURE.md)*.
